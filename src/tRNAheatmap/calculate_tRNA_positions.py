@@ -85,9 +85,9 @@ class Region:
 
 def annotate_positions(ss):
   loop_indices = []
-  for i, indices in enumerate([r.span() for r in re.finditer('([\(\.]+\()|(<[<\.]+<)|[_\.]+|>[>\.]+>|\)[\)\.]+', ss)]):
+  for i, indices in enumerate([r.span() for r in re.finditer(r'([\(\.]+\()|(<[<\.]+<)|[_\.]+|>[>\.]+>|\)[\)\.]+', ss)]):
     left, right = indices
-    if re.search('[\(<_>\)]', ss[left:right]): loop_indices.append(indices)
+    if re.search(r'[\(<_>\)]', ss[left:right]): loop_indices.append(indices)
   regions = ['acceptor', 'dstem', 'dloop', 'dstem', 'acstem', 'acloop', 'acstem', 'vstem', 'vloop', 'vstem', 'tpcstem', 'tpcloop', 'tpcstem', 'acceptor']
   regions = [Region(indices[0], indices[1], name) for indices, name in zip(loop_indices, regions[:])]
   region = regions[0]
