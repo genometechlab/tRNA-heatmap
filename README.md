@@ -16,7 +16,7 @@ Visualizes tRNA alignment pileup data as a mismatch-rate heatmap with a shared S
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/your-org/tRNA-heatmap.git
+   git clone github.com/genometechlab/tRNA-heatmap
    cd tRNA-heatmap
    ```
 
