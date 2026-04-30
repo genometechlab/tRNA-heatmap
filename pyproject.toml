@@ -36,4 +36,4 @@ tRNAheatmap = "tRNAheatmap.CLI:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-tRNAheatmap = ["*.cm"]
+tRNAheatmap = ["alignment_cm/*.cm", "plotting_styles/*.mplstyle"]

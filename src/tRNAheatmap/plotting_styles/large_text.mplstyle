@@ -1,0 +1,138 @@
+# tRNA-heatmap default style
+# ─────────────────────────────────────────────────────────────────────────────
+# Copy this file, edit any values, and pass your copy with --style:
+#   tRNAheatmap run --ref ref.fa --condition sample data.bam --organism eukaryotic \
+#               --style my.mplstyle
+#
+# Values marked [tRNA-heatmap override] differ from matplotlib defaults.
+# All other values are matplotlib defaults included here for discoverability.
+# figure.figsize is intentionally absent — the tool sizes figures automatically
+# based on the number of references and Sprinzl positions (see --cell-size).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+## ── Font ────────────────────────────────────────────────────────────────────
+# font.family controls which font stack is tried first.
+# Options: sans-serif, serif, monospace, cursive, fantasy, or a font name.
+font.family  : sans-serif
+
+# Preferred sans-serif fonts tried in order.
+font.sans-serif : DejaVu Sans, Bitstream Vera Sans, Helvetica, Arial, sans-serif
+
+# Base font size used by relative size names (small, medium, large, x-large).
+# Changing this scales all relative sizes (axes labels, tick labels, title)
+# proportionally without needing to touch each one individually.
+font.size    : 40.0
+
+font.style   : normal
+font.weight  : normal
+font.stretch : normal
+
+
+## ── Text ────────────────────────────────────────────────────────────────────
+text.color       : black
+text.antialiased : True
+
+
+## ── Figure ──────────────────────────────────────────────────────────────────
+# Background color of the figure canvas (outside the axes).
+figure.facecolor : white
+figure.edgecolor : white
+figure.frameon   : True
+
+
+## ── Axes ────────────────────────────────────────────────────────────────────
+axes.facecolor   : white
+axes.edgecolor   : black
+axes.linewidth   : 0.8
+
+# Grid lines — off by default; set to True to show a grid over the heatmap.
+axes.grid        : False
+axes.grid.axis   : both
+axes.grid.which  : major
+
+# Axis label appearance.
+axes.labelsize   : 25          # [tRNA-heatmap override] matplotlib default: medium (10)
+axes.labelpad    : 4.0
+axes.labelcolor  : black
+axes.labelweight : normal
+
+# Title appearance.
+axes.titlesize   : 45          # [tRNA-heatmap override] matplotlib default: large (12)
+axes.titlepad    : 6.0
+axes.titlecolor  : auto       # auto = same as axes.labelcolor
+axes.titleweight : normal
+axes.titlelocation : center   # left, center, right
+
+# Spines (the box around the plot area). Set any to False to hide that border.
+axes.spines.left   : True
+axes.spines.bottom : True
+axes.spines.right  : True
+axes.spines.top    : True
+
+
+## ── X Ticks ─────────────────────────────────────────────────────────────────
+# Sprinzl position labels appear on the x-axis, rotated 90°.
+xtick.direction   : out
+xtick.color       : black
+xtick.labelsize   : 15        # [tRNA-heatmap override] matplotlib default: medium (10)
+xtick.labelcolor  : inherit
+
+xtick.major.size  : 3.5       # tick length in points
+xtick.major.width : 0.8
+xtick.major.pad   : 3.5       # distance from axis to label
+
+xtick.bottom      : True
+xtick.top         : False
+xtick.labelbottom : True
+xtick.labeltop    : False
+
+
+## ── Y Ticks ─────────────────────────────────────────────────────────────────
+# Reference sequence names appear on the y-axis.
+ytick.direction   : out
+ytick.color       : black
+ytick.labelsize   : 12         # [tRNA-heatmap override] matplotlib default: medium (10)
+ytick.labelcolor  : inherit
+
+ytick.major.size  : 3.5
+ytick.major.width : 0.8
+ytick.major.pad   : 3.5
+
+ytick.left        : True
+ytick.right       : False
+ytick.labelleft   : True
+ytick.labelright  : False
+
+
+## ── Lines & Scatter ─────────────────────────────────────────────────────────
+# These affect the black dots drawn at cmalign-gap positions (no-base cells).
+lines.linewidth  : 1.5
+lines.markersize : 6.0
+scatter.marker   : o
+
+
+## ── Image / Colormap ────────────────────────────────────────────────────────
+# Default colormap used when no --palette is specified.
+# Note: --palette (light-high, dark-high, viridis) overrides this entirely.
+image.cmap : viridis
+
+
+## ── Output & Saving ─────────────────────────────────────────────────────────
+# pdf.fonttype 42 = TrueType embedding (crisp text in PDF viewers and Illustrator).
+# Change to 3 (Type 3) only if your PDF workflow requires it.
+pdf.fonttype : 42             # [tRNA-heatmap override] matplotlib default: 3
+
+# svg.fonttype none = text stays as editable text in SVG (best for Illustrator/Inkscape).
+# Change to path to convert text to outlines (avoids font substitution issues).
+svg.fonttype : none           # [tRNA-heatmap override] matplotlib default: path
+
+# DPI for raster formats (PNG). PDF/SVG are always vector regardless of this.
+# Can also be set per-run with --dpi.
+savefig.dpi         : figure  # 'figure' = use the figure's own dpi setting
+
+savefig.transparent : False   # True = transparent background (useful for slides)
+savefig.facecolor   : auto    # auto = use figure.facecolor
+savefig.edgecolor   : auto
+savefig.bbox        : standard  # 'tight' crops whitespace automatically; 'standard' uses default padding
+savefig.pad_inches  : 0.1     # padding around figure when savefig.bbox = 'tight'

@@ -4,124 +4,53 @@ CLI entry point for tRNA pileup heatmap generation.
 
 Subcommands
 -----------
-  run        Full pipeline: pileup → Sprinzl mapping → heatmap (+ optional save)
-  plot       Plot heatmap from a pre-computed NPZ (skips pileup and cmalign)
-  delta      Pairwise delta heatmaps from multiple pre-computed NPZ files
-  run-delta  Full pipeline for ≥2 BAMs → pairwise delta heatmap in one step
-  inspect    Dry-run: visualize Sprinzl coordinate coverage without any pileup
+  run      Full pipeline: pileup → Sprinzl mapping → heatmap. With one input
+           condition, emits a single heatmap; with ≥2, emits pairwise delta
+           heatmaps (and per-condition heatmaps with --individual).
+  inspect  Dry-run: visualize Sprinzl coordinate coverage without any pileup.
 
 Examples
 --------
-  # Full pipeline with a bundled organism model
-  python CLI.py run \\
-      --ref ref.fa --bam aligned.bam --organism eukaryotic \\
-      --output heatmap.png --save-df pileup
+  # Single heatmap from one BAM (one --condition group with one BAM)
+  python -m tRNAheatmap.CLI run \\
+      --ref ref.fa --organism eukaryotic \\
+      --condition sample aligned.bam \\
+      --output heatmap.pdf --save-df pileup
 
-  # Delta heatmap directly from two BAMs (no intermediate NPZ files)
-  python CLI.py run-delta \\
-      --ref ref.fa --bam condA.bam condB.bam --organism eukaryotic \\
+  # Pairwise delta from two single-BAM conditions
+  python -m tRNAheatmap.CLI run \\
+      --ref ref.fa --organism eukaryotic \\
+      --condition condA condA.bam --condition condB condB.bam \\
       --output results/delta
 
-  # Plot only (no pileup or Infernal required)
-  python CLI.py plot --load pileup.npz --output heatmap.png \\
-      --palette dark-high --title "My Experiment" --ylabel "Isotype"
-
-  # Delta heatmaps between all pairs of NPZ files
-  python CLI.py delta --load A.npz B.npz C.npz --output results/delta
+  # Replicate-aware deltas with --merge-mode equal
+  python -m tRNAheatmap.CLI run \\
+      --ref ref.fa --organism eukaryotic --merge-mode equal \\
+      --condition WT wt1.bam wt2.bam wt3.bam \\
+      --condition KO ko1.bam ko2.bam ko3.bam \\
+      --output results/delta
 
   # Inspect Sprinzl coordinate coverage (no BAM or pileup needed)
-  python CLI.py inspect --ref ref.fa --organism eukaryotic --output coverage.png
+  python -m tRNAheatmap.CLI inspect --ref ref.fa --organism eukaryotic --output coverage.pdf
 """
 
 import argparse
 import os
-import tempfile
-from .pileup_engine import pileup
+
 from .calculate_tRNA_positions import (get_sprinzl_mapping, save_sprinzl_mapping,
                                         load_sprinzl_mapping, build_axis_from_mapping)
-from . import heatmap
+import matplotlib.pyplot as plt
+from . import heatmap, pipeline
 
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
+_CM_DIR  = os.path.join(_PKG_DIR, 'alignment_cm')
 BUNDLED_MODELS = {
-    'eukaryotic': os.path.join(_PKG_DIR, 'euk-num.cm'),
-    'prokaryotic': os.path.join(_PKG_DIR, 'bact-num.cm'),
-    'archaeal':    os.path.join(_PKG_DIR, 'arch-num.cm'),
+    'eukaryotic': os.path.join(_CM_DIR, 'euk-num.cm'),
+    'prokaryotic': os.path.join(_CM_DIR, 'bact-num.cm'),
+    'archaeal':    os.path.join(_CM_DIR, 'arch-num.cm'),
 }
 
 PALETTE_CHOICES = list(heatmap.PALETTES.keys())
-
-
-# ---------------------------------------------------------------------------
-# FASTA / adapter utilities
-# ---------------------------------------------------------------------------
-
-def _read_fasta(ref_fasta):
-    """Parse FASTA file. Returns list of (name, seq) tuples."""
-    seqs, name, buf = [], None, []
-    with open(ref_fasta) as fh:
-        for line in fh:
-            line = line.rstrip()
-            if line.startswith('>'):
-                if name:
-                    seqs.append((name, ''.join(buf)))
-                name, buf = line[1:].split()[0], []
-            else:
-                buf.append(line)
-    if name:
-        seqs.append((name, ''.join(buf)))
-    return seqs
-
-
-def _detect_adapters(sequences):
-    """
-    Find common 5' prefix and 3' suffix lengths across all sequences.
-
-    The terminal 3' CCA is always preserved: if the detected suffix ends in
-    CCA, trim3 is reduced by 3 so the biologically required CCA tail is kept.
-    """
-    seqs = [s for _, s in sequences]
-    trim5 = 0
-    for bases in zip(*seqs):
-        if len(set(bases)) == 1:
-            trim5 += 1
-        else:
-            break
-    trim3 = 0
-    for bases in zip(*[s[::-1] for s in seqs]):
-        if len(set(bases)) == 1:
-            trim3 += 1
-        else:
-            break
-    # Protect the CCA tail: if the detected suffix begins with CCA (reading
-    # 5'→3'), it is the biologically required mature tRNA tail, not adapter.
-    # e.g. suffix = 'CCAGGCTTC' → trim only 'GGCTTC'; suffix = 'CCA' → trim nothing.
-    if trim3 >= 3:
-        L = len(seqs[0])
-        if seqs[0][L - trim3 : L - trim3 + 3].upper() == 'CCA':
-            trim3 -= 3
-    return trim5, trim3
-
-
-def _write_trimmed_fasta(ref_fasta, trim5, trim3):
-    """Write trim-adjusted sequences to a temp file. Caller must os.unlink()."""
-    seqs = _read_fasta(ref_fasta)
-    fd, tmp_path = tempfile.mkstemp(suffix='.fa')
-    with os.fdopen(fd, 'w') as f:
-        for name, seq in seqs:
-            end = len(seq) - trim3 if trim3 > 0 else len(seq)
-            f.write(f'>{name}\n{seq[trim5:end]}\n')
-    return tmp_path
-
-
-def _trim_arrays(arrays, trim5, trim3):
-    """Slice pileup arrays to remove adapter positions."""
-    if trim5 == 0 and trim3 == 0:
-        return arrays
-    result = {}
-    for name, arr in arrays.items():
-        end = arr.shape[1] - trim3 if trim3 > 0 else arr.shape[1]
-        result[name] = arr[:, trim5:end]
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -152,13 +81,29 @@ def _add_plot_flags(p):
         action="store_true",
         dest="include_insertions",
         help="Show insertion positions (e.g. 36i1) in the heatmap. "
-             "They are always stored in NPZ/TSV files."
+             "They are always stored in TSV files."
     )
     p.add_argument(
         "--dpi",
         type=int,
         default=300,
         help="Output image resolution in DPI. Default: 300."
+    )
+    p.add_argument(
+        "--cell-size",
+        dest="cell_size",
+        type=float,
+        default=0.25,
+        metavar="FLOAT",
+        help="Inches per heatmap cell for auto figure sizing. Default: 0.25."
+    )
+    p.add_argument(
+        "--style",
+        dest="mpl_style",
+        default=None,
+        metavar="FILE",
+        help="Matplotlib style sheet (.mplstyle) to layer on top of the bundled default. "
+             "Copy src/tRNAheatmap/plotting_styles/default.mplstyle as a starting point."
     )
     p.add_argument(
         "--outdir", "-O",
@@ -224,6 +169,66 @@ def _add_sprinzl_override_flags(p):
     )
 
 
+def _add_condition_flags(p):
+    """Add --condition and --merge-mode flags to a subparser."""
+    p.add_argument(
+        "--condition", "-C",
+        nargs='+',
+        action='append',
+        dest='condition',
+        default=None,
+        metavar='NAME_OR_BAM',
+        help="Condition group: first token is the condition name, "
+             "remaining tokens are sorted BAM paths. "
+             "Repeat for multiple conditions: "
+             "--condition WT rep1.bam rep2.bam --condition KO rep3.bam rep4.bam. "
+             "At least one --condition is required."
+    )
+    p.add_argument(
+        "--merge-mode",
+        choices=['total', 'equal'],
+        default='total',
+        dest='merge_mode',
+        help="How to merge multiple BAMs within a condition. "
+             "'total' (default): sum raw counts — higher-depth replicates "
+             "contribute proportionally more. "
+             "'equal': average per-BAM mismatch rates — each replicate "
+             "contributes equally regardless of sequencing depth."
+    )
+
+
+def _add_ref_filter_flags(p):
+    """Add mutually-exclusive reference filtering flags to a subparser."""
+    ref_group = p.add_mutually_exclusive_group()
+    ref_group.add_argument(
+        "--include-refs",
+        dest="include_refs",
+        default=None,
+        metavar="FILE",
+        help="Plain-text file (one reference name per line). Only the listed "
+             "references will appear in the output; all others are dropped. "
+             "Mutually exclusive with --exclude-refs."
+    )
+    ref_group.add_argument(
+        "--exclude-refs",
+        dest="exclude_refs",
+        default=None,
+        metavar="FILE",
+        help="Plain-text file (one reference name per line). Listed references "
+             "are removed from the output; all others are kept. "
+             "Mutually exclusive with --include-refs."
+    )
+
+
+def _filter_refs(arrays, args):
+    """Thin shim: pull include/exclude paths off args and dispatch to pipeline."""
+    return pipeline.apply_ref_filter(
+        arrays,
+        include_file=getattr(args, 'include_refs', None),
+        exclude_file=getattr(args, 'exclude_refs', None),
+    )
+
+
 def _resolve_sprinzl_mapping(args, ref_for_cmalign, parser):
     """
     Compute or load the Sprinzl mapping based on CLI flags.
@@ -248,16 +253,19 @@ def _resolve_sprinzl_mapping(args, ref_for_cmalign, parser):
     else:
         sprinzl_axis, ref_to_sprinzl = None, {}
 
+    mod_map = {}
     if has_map:
-        tsv_mapping = load_sprinzl_mapping(args.sprinzl_map)
+        tsv_mapping, mod_map = load_sprinzl_mapping(args.sprinzl_map)
         if not has_cm:
             ref_to_sprinzl = tsv_mapping
             sprinzl_axis = build_axis_from_mapping(ref_to_sprinzl)
         else:
-            # Patch mode: TSV entries overwrite cmalign results for listed refs
+            # Patch mode: TSV entries overwrite cmalign results for listed refs;
+            # rebuild axis so any new labels (e.g. -1) from the TSV are included.
             ref_to_sprinzl.update(tsv_mapping)
+            sprinzl_axis = build_axis_from_mapping(ref_to_sprinzl)
 
-    return sprinzl_axis, ref_to_sprinzl
+    return sprinzl_axis, ref_to_sprinzl, mod_map
 
 
 def build_parser():
@@ -268,21 +276,17 @@ def build_parser():
     subparsers = parser.add_subparsers(dest='command', required=True)
 
     # ------------------------------------------------------------------
-    # 'run' subcommand — full pipeline
+    # 'run' subcommand — full pipeline (single heatmap or pairwise deltas)
     # ------------------------------------------------------------------
     run_p = subparsers.add_parser(
         'run',
-        help='Full pipeline: pileup + Sprinzl mapping + heatmap.',
+        help='Full pipeline: pileup + Sprinzl mapping + heatmap. With ≥2 '
+             '--condition groups, emits pairwise delta heatmaps.',
     )
     run_p.add_argument(
         "--ref", "-r",
         required=True,
         help="Path to reference tRNA FASTA file."
-    )
-    run_p.add_argument(
-        "--bam", "-b",
-        required=True,
-        help="Path to aligned BAM file (must be sorted)."
     )
     cm_group = run_p.add_mutually_exclusive_group(required=False)
     cm_group.add_argument(
@@ -300,15 +304,24 @@ def build_parser():
     )
     run_p.add_argument(
         "--output", "-o",
-        default="heatmap.png",
-        help="Output heatmap file. Format from extension (.png, .pdf, .svg). "
-             "Default: heatmap.png"
+        default="heatmap.pdf",
+        help="With one --condition: output heatmap file (extension determines format). "
+             "With ≥2 --condition groups: prefix; pairs become {prefix}_{A}_vs_{B}.{ext} "
+             "(default extension .pdf). Default: heatmap.pdf"
     )
     run_p.add_argument(
         "--save-df", "-s",
         default=None,
         dest="save_df",
-        help="Base name (no extension) to save pileup as both .npz and .tsv."
+        help="Base name (no extension) to save pileup data as a .tsv file. "
+             "Only valid with exactly one condition."
+    )
+    run_p.add_argument(
+        "--individual",
+        action="store_true",
+        dest="individual",
+        help="With ≥2 --condition groups, also emit a per-condition heatmap "
+             "({prefix}_{condition}.{ext}) alongside the pairwise deltas."
     )
     run_p.add_argument(
         "--threads", "-t",
@@ -318,97 +331,9 @@ def build_parser():
     )
     _add_adapter_flags(run_p)
     _add_sprinzl_override_flags(run_p)
+    _add_condition_flags(run_p)
+    _add_ref_filter_flags(run_p)
     _add_plot_flags(run_p)
-
-    # ------------------------------------------------------------------
-    # 'plot' subcommand — plot from pre-computed NPZ
-    # ------------------------------------------------------------------
-    plot_p = subparsers.add_parser(
-        'plot',
-        help='Plot heatmap from a pre-computed NPZ file.',
-    )
-    plot_p.add_argument(
-        "--load", "-l",
-        required=True,
-        help="Path to a pre-computed .npz file from 'run --save-df'."
-    )
-    plot_p.add_argument(
-        "--output", "-o",
-        default="heatmap.png",
-        help="Output heatmap file. Default: heatmap.png"
-    )
-    _add_plot_flags(plot_p)
-
-    # ------------------------------------------------------------------
-    # 'delta' subcommand — pairwise delta heatmaps
-    # ------------------------------------------------------------------
-    delta_p = subparsers.add_parser(
-        'delta',
-        help='Pairwise delta heatmaps across multiple pre-computed NPZ files.',
-    )
-    delta_p.add_argument(
-        "--load", "-l",
-        nargs='+',
-        required=True,
-        metavar="NPZ",
-        help="Two or more pre-computed .npz files."
-    )
-    delta_p.add_argument(
-        "--output", "-o",
-        default="delta",
-        help="Output prefix (with optional extension). "
-             "Produces {prefix}_{A}_vs_{B}.{ext} per pair. Default: 'delta'."
-    )
-    _add_plot_flags(delta_p)
-
-    # ------------------------------------------------------------------
-    # 'run-delta' subcommand — full pipeline straight to delta heatmap
-    # ------------------------------------------------------------------
-    rundelta_p = subparsers.add_parser(
-        'run-delta',
-        help='Full pipeline for ≥2 BAMs, producing pairwise delta heatmaps directly.',
-    )
-    rundelta_p.add_argument(
-        "--ref", "-r",
-        required=True,
-        help="Path to reference tRNA FASTA file (shared across all BAMs)."
-    )
-    rundelta_p.add_argument(
-        "--bam", "-b",
-        nargs='+',
-        required=True,
-        metavar="BAM",
-        help="Two or more sorted BAM files to compare."
-    )
-    cm_group_rd = rundelta_p.add_mutually_exclusive_group(required=False)
-    cm_group_rd.add_argument(
-        "--organism", "-g",
-        choices=["eukaryotic", "prokaryotic", "archaeal"],
-        dest="organism",
-        help="Use a bundled covariance model: eukaryotic (euk-num.cm), "
-             "prokaryotic (bact-num.cm), or archaeal (arch-num.cm)."
-    )
-    cm_group_rd.add_argument(
-        "--cm", "-c",
-        dest="cm",
-        metavar="FILE",
-        help="Path to a custom Infernal covariance model (.cm file)."
-    )
-    rundelta_p.add_argument(
-        "--output", "-o",
-        default="delta",
-        help="Output prefix (with optional extension). "
-             "Produces {prefix}_{stemA}_vs_{stemB}.{ext} per pair. Default: 'delta'."
-    )
-    rundelta_p.add_argument(
-        "--threads", "-t",
-        type=int,
-        default=1,
-        help="Threads for pileup engine. Default: 1"
-    )
-    _add_adapter_flags(rundelta_p)
-    _add_sprinzl_override_flags(rundelta_p)
-    _add_plot_flags(rundelta_p)
 
     # ------------------------------------------------------------------
     # 'inspect' subcommand — Sprinzl coverage without pileup
@@ -438,10 +363,26 @@ def build_parser():
     )
     inspect_p.add_argument(
         "--output", "-o",
-        default="sprinzl_coverage.png",
+        default="sprinzl_coverage.pdf",
         help="Output heatmap file. Format from extension (.png, .pdf, .svg). "
-             "Default: sprinzl_coverage.png"
+             "Default: sprinzl_coverage.pdf"
     )
+    inspect_p.add_argument(
+        "--include-sequence",
+        dest="include_sequence",
+        action="store_true",
+        default=False,
+        help="Write the nucleotide letter in white on each covered cell.",
+    )
+    inspect_p.add_argument(
+        "--seq-fontsize",
+        dest="seq_fontsize",
+        type=float,
+        default=5.0,
+        metavar="FLOAT",
+        help="Font size for nucleotide letters drawn with --include-sequence. Default: 5.0.",
+    )
+    _add_ref_filter_flags(inspect_p)
     _add_adapter_flags(inspect_p)
     _add_sprinzl_override_flags(inspect_p)
     _add_plot_flags(inspect_p)
@@ -460,48 +401,70 @@ def _resolve_output(path, outdir):
     return path
 
 
-def _apply_adapter_trim(args, parser):
+def _adapter_trim_context(args, parser):
     """
-    Resolve adapter trimming from CLI flags.
+    CLI-side wrapper around pipeline.adapter_trimmed_ref.
 
-    Returns (trim5, trim3, tmp_ref_path_or_None). If a temp file is returned,
-    the caller must os.unlink() it in a finally block.
+    Validates adapter-related CLI flags using parser.error (so argparse
+    formatting drives error messages), then returns the context manager that
+    yields (effective_ref_path, trim_5, trim_3) and cleans up any temp file.
     """
     detect = getattr(args, 'detect_adapters', False)
     trim5  = getattr(args, 'trim_5', 0)
     trim3  = getattr(args, 'trim_3', 0)
-
     if detect and (trim5 or trim3):
         parser.error("--detect-adapters cannot be combined with --trim-5 or --trim-3.")
-
     if detect:
-        seqs = _read_fasta(args.ref)
+        seqs = pipeline.read_fasta(args.ref)
         if len(seqs) < 2:
             parser.error("--detect-adapters requires ≥2 sequences in the reference FASTA.")
-        trim5, trim3 = _detect_adapters(seqs)
-        print(f"Detected adapters: 5' trim = {trim5} bp, 3' trim = {trim3} bp")
-
-    if trim5 == 0 and trim3 == 0:
-        return 0, 0, None
-
-    tmp = _write_trimmed_fasta(args.ref, trim5, trim3)
-    return trim5, trim3, tmp
+    return pipeline.adapter_trimmed_ref(
+        args.ref, trim_5=trim5, trim_3=trim3, detect=detect)
 
 
 def main():
     parser = build_parser()
     args = parser.parse_args()
 
-    if args.command == 'run':
-        trim5, trim3, tmp_ref = _apply_adapter_trim(args, parser)
-        ref_for_cmalign = tmp_ref or args.ref
-        try:
-            print(f"Running pileup on {args.bam} against {args.ref} "
-                  f"using {args.threads} thread(s)...")
-            arrays = pileup(args.bam, args.ref, args.threads)
-            arrays = _trim_arrays(arrays, trim5, trim3)
+    _DEFAULT_TITLE = "tRNA Alignment Pileup Heatmap"
 
-            sprinzl_axis, ref_to_sprinzl = _resolve_sprinzl_mapping(
+    # Apply matplotlib styles before any plot is created
+    _default_style = os.path.join(_PKG_DIR, 'plotting_styles', 'default.mplstyle')
+    plt.style.use(_default_style)
+    if getattr(args, 'mpl_style', None):
+        plt.style.use(args.mpl_style)
+
+    if args.command == 'run':
+        conditions = pipeline.build_conditions(args.condition, parser.error)
+        if args.save_df and len(conditions) != 1:
+            parser.error("--save-df is only valid with exactly one condition.")
+
+        with _adapter_trim_context(args, parser) as (ref_for_cmalign, trim5, trim3):
+            # Build {cond_name: rates_dict} uniformly; keep counts only when
+            # we'll need them for the count-based TSV save (single-condition
+            # total mode).
+            rates_by_condition = {}
+            counts_for_tsv     = None
+            stds_for_tsv       = None
+            print(f"Running pileup for {len(conditions)} condition(s) "
+                  f"(merge-mode: {args.merge_mode})...")
+            for cond_name, bam_paths in conditions.items():
+                print(f"  Condition '{cond_name}': {len(bam_paths)} BAM(s)...")
+                if args.merge_mode == 'equal':
+                    r, s = pipeline.run_condition(bam_paths, args.ref, args.threads, 'equal')
+                    rates_by_condition[cond_name] = _filter_refs(
+                        pipeline.trim_arrays(r, trim5, trim3), args)
+                    if len(conditions) == 1:
+                        stds_for_tsv = _filter_refs(
+                            pipeline.trim_arrays(s, trim5, trim3), args)
+                else:
+                    c = pipeline.run_condition(bam_paths, args.ref, args.threads, 'total')
+                    c = _filter_refs(pipeline.trim_arrays(c, trim5, trim3), args)
+                    rates_by_condition[cond_name] = pipeline.counts_to_rates(c)
+                    if len(conditions) == 1:
+                        counts_for_tsv = c
+
+            sprinzl_axis, ref_to_sprinzl, mod_map = _resolve_sprinzl_mapping(
                 args, ref_for_cmalign, parser)
 
             if args.save_mapping:
@@ -511,90 +474,61 @@ def main():
 
             if args.save_df:
                 save_path = _resolve_output(args.save_df, args.outdir)
-                print(f"Saving pileup data -> {save_path}.npz + {save_path}.tsv")
-                heatmap.save_pileup(arrays, sprinzl_axis, ref_to_sprinzl, save_path)
+                cond_name = next(iter(rates_by_condition))
+                if counts_for_tsv is not None:
+                    heatmap.save_pileup(counts_for_tsv, sprinzl_axis, ref_to_sprinzl, save_path)
+                else:
+                    heatmap.save_rates(rates_by_condition[cond_name], sprinzl_axis,
+                                       ref_to_sprinzl, save_path, std_dict=stds_for_tsv)
 
             output_path = _resolve_output(args.output, args.outdir)
-            print(f"Generating heatmap -> {output_path}")
-            heatmap.plot(arrays, sprinzl_axis, ref_to_sprinzl, output_path,
-                         palette=args.palette,
-                         ylabel=args.ylabel,
-                         title=args.title,
-                         show_insertions=args.include_insertions,
-                         dpi=args.dpi)
-        finally:
-            if tmp_ref:
-                os.unlink(tmp_ref)
 
-    elif args.command == 'plot':
-        output_path = _resolve_output(args.output, args.outdir)
-        print(f"Loading pre-computed pileup from {args.load}...")
-        heatmap.plot_from_npz(args.load, output_path,
-                              palette=args.palette,
-                              ylabel=args.ylabel,
-                              title=args.title,
-                              show_insertions=args.include_insertions,
-                              dpi=args.dpi)
+            if len(rates_by_condition) == 1:
+                cond_name, rates = next(iter(rates_by_condition.items()))
+                plot_title = cond_name if args.title == _DEFAULT_TITLE else args.title
+                print(f"Generating heatmap -> {output_path}")
+                heatmap.plot(rates, sprinzl_axis, ref_to_sprinzl, output_path,
+                             palette=args.palette,
+                             ylabel=args.ylabel,
+                             title=plot_title,
+                             show_insertions=args.include_insertions,
+                             dpi=args.dpi, cell_size=args.cell_size, mod_map=mod_map)
+            else:
+                if args.individual:
+                    base, ext = os.path.splitext(output_path)
+                    if not ext:
+                        ext = '.pdf'
+                    for cond_name, rates in rates_by_condition.items():
+                        ind_path = f"{base}_{cond_name}{ext}"
+                        print(f"Generating individual heatmap -> {ind_path}")
+                        heatmap.plot(rates, sprinzl_axis, ref_to_sprinzl, ind_path,
+                                     palette=args.palette, ylabel=args.ylabel,
+                                     title=cond_name, show_insertions=args.include_insertions,
+                                     dpi=args.dpi, cell_size=args.cell_size, mod_map=mod_map)
 
-    elif args.command == 'delta':
-        if len(args.load) < 2:
-            parser.error("delta requires at least 2 NPZ files via --load.")
-        output_prefix = _resolve_output(args.output, args.outdir)
-        print(f"Computing pairwise delta heatmaps for {len(args.load)} file(s)...")
-        heatmap.delta_heatmap(
-            npz_paths=args.load,
-            output_prefix=output_prefix,
-            palette=args.palette,
-            ylabel=args.ylabel,
-            title=args.title if args.title != "tRNA Alignment Pileup Heatmap" else None,
-            show_insertions=args.include_insertions,
-            dpi=args.dpi,
-        )
-
-    elif args.command == 'run-delta':
-        if len(args.bam) < 2:
-            parser.error("run-delta requires at least 2 BAM files via --bam.")
-        trim5, trim3, tmp_ref = _apply_adapter_trim(args, parser)
-        ref_for_cmalign = tmp_ref or args.ref
-        try:
-            sprinzl_axis, ref_to_sprinzl = _resolve_sprinzl_mapping(
-                args, ref_for_cmalign, parser)
-
-            if args.save_mapping:
-                mapping_path = _resolve_output(args.save_mapping + '.tsv', args.outdir)
-                save_sprinzl_mapping(sprinzl_axis, ref_to_sprinzl, mapping_path)
-                print(f"Saved Sprinzl mapping -> {mapping_path}")
-
-            arrays_by_stem = {}
-            for bam_path in args.bam:
-                stem = os.path.splitext(os.path.basename(bam_path))[0]
-                print(f"Running pileup on {bam_path} using {args.threads} thread(s)...")
-                arr = pileup(bam_path, args.ref, args.threads)
-                arrays_by_stem[stem] = _trim_arrays(arr, trim5, trim3)
-
-            output_prefix = _resolve_output(args.output, args.outdir)
-            print(f"Computing pairwise delta heatmaps for {len(args.bam)} BAM(s)...")
-            heatmap.delta_from_arrays(
-                arrays_by_stem=arrays_by_stem,
-                sprinzl_axis=sprinzl_axis,
-                ref_to_sprinzl=ref_to_sprinzl,
-                output_prefix=output_prefix,
-                palette=args.palette,
-                ylabel=args.ylabel,
-                title=args.title if args.title != "tRNA Alignment Pileup Heatmap" else None,
-                show_insertions=args.include_insertions,
-                dpi=args.dpi,
-            )
-        finally:
-            if tmp_ref:
-                os.unlink(tmp_ref)
+                delta_title = args.title if args.title != _DEFAULT_TITLE else None
+                print(f"Computing pairwise delta heatmaps for {len(rates_by_condition)} condition(s)...")
+                heatmap.delta(
+                    rates_by_condition=rates_by_condition,
+                    sprinzl_axis=sprinzl_axis,
+                    ref_to_sprinzl=ref_to_sprinzl,
+                    output_prefix=output_path,
+                    palette=args.palette,
+                    ylabel=args.ylabel,
+                    title=delta_title,
+                    show_insertions=args.include_insertions,
+                    dpi=args.dpi,
+                    cell_size=args.cell_size,
+                    mod_map=mod_map,
+                )
 
     elif args.command == 'inspect':
-        trim5, trim3, tmp_ref = _apply_adapter_trim(args, parser)
-        ref_for_cmalign = tmp_ref or args.ref
-        try:
-            sprinzl_axis, ref_to_sprinzl = _resolve_sprinzl_mapping(
+        with _adapter_trim_context(args, parser) as (ref_for_cmalign, _, _):
+            sprinzl_axis, ref_to_sprinzl, mod_map = _resolve_sprinzl_mapping(
                 args, ref_for_cmalign, parser)
+
+            ref_to_sprinzl = _filter_refs(ref_to_sprinzl, args)
+            sprinzl_axis = build_axis_from_mapping(ref_to_sprinzl)
 
             if args.save_mapping:
                 mapping_path = _resolve_output(args.save_mapping + '.tsv', args.outdir)
@@ -602,7 +536,8 @@ def main():
                 print(f"Saved Sprinzl mapping -> {mapping_path}")
 
             output_path = _resolve_output(args.output, args.outdir)
-            title = args.title if args.title != "tRNA Alignment Pileup Heatmap" else "tRNA Sprinzl Coverage"
+            title = args.title if args.title != _DEFAULT_TITLE else "tRNA Sprinzl Coverage"
+            ref_to_seq = pipeline.read_fasta_dict(ref_for_cmalign) if args.include_sequence else None
             print(f"Generating Sprinzl coverage map -> {output_path}")
             heatmap.plot_sprinzl_coverage(
                 sprinzl_axis, ref_to_sprinzl, output_path,
@@ -610,11 +545,12 @@ def main():
                 ylabel=args.ylabel,
                 title=title,
                 show_insertions=args.include_insertions,
+                ref_to_seq=ref_to_seq,
+                seq_fontsize=args.seq_fontsize,
                 dpi=args.dpi,
+                cell_size=args.cell_size,
+                mod_map=mod_map,
             )
-        finally:
-            if tmp_ref:
-                os.unlink(tmp_ref)
 
     print("Done.")
 

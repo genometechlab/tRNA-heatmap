@@ -105,7 +105,8 @@ def annotate_positions(ss):
     if ss[position] == '.':
       insert_index += 1
       sprinzl_insert_index += 1
-      sprinzl = '{}i{}'.format(sprinzl_positions[sprinzl_index - 1].split(':')[0], sprinzl_insert_index)
+      base = '-1' if sprinzl_index == 0 else sprinzl_positions[sprinzl_index - 1].split(':')[0]
+      sprinzl = f'{base}i{sprinzl_insert_index}'
       positions.append(Position(position=str(position + 1), sprinzl=sprinzl, index=len(positions), paired=False))
     else:
       if position < region.lower:
@@ -310,6 +311,7 @@ def get_sprinzl_mapping(ref_fasta, cm_model):
 # Insertions (e.g. '36i1') are not listed here; they sort immediately after
 # their base position via build_axis_from_mapping().
 _CANONICAL_SPRINZL = [
+  '-1',
   '1', '2', '3', '4', '5', '6', '7', '8', '9',
   '10', '11', '12', '13', '14', '15', '16', '17', '17a', '18', '19',
   '20', '20a', '20b', '21', '22', '23', '24', '25', '26',
@@ -327,10 +329,20 @@ _CANONICAL_RANK = {lbl: i for i, lbl in enumerate(_CANONICAL_SPRINZL)}
 
 
 def _sprinzl_sort_key(label):
-  """Sort key that places insertions (e.g. '36i1') after their base position."""
+  """Sort key for Sprinzl labels.
+
+  Handles three forms:
+    plain        '23'   → (rank, 0, 0)
+    alpha-suffix '23c'  → (rank_of_'23', 1, ord-sum-of-suffix)  sorts after bare number
+    insertion    '36i1' → (rank_of_'36', 2, insertion_number)   sorts after alpha-suffix
+  Unknown base labels fall back to rank len(_CANONICAL_SPRINZL) (appended at end).
+  """
   if 'i' in label:
     base, ins = label.rsplit('i', 1)
-    return (_CANONICAL_RANK.get(base, len(_CANONICAL_SPRINZL)), 1, int(ins))
+    return (_CANONICAL_RANK.get(base, len(_CANONICAL_SPRINZL)), 2, int(ins))
+  m = re.match(r'^(.*?)([a-z]+)$', label)
+  if m and m.group(1) in _CANONICAL_RANK:
+    return (_CANONICAL_RANK[m.group(1)], 1, sum(ord(c) for c in m.group(2)))
   return (_CANONICAL_RANK.get(label, len(_CANONICAL_SPRINZL)), 0, 0)
 
 
@@ -350,21 +362,27 @@ def build_axis_from_mapping(ref_to_sprinzl):
 # Human-readable mapping I/O
 # ---------------------------------------------------------------------------
 
-def save_sprinzl_mapping(sprinzl_axis, ref_to_sprinzl, path):
+def save_sprinzl_mapping(sprinzl_axis, ref_to_sprinzl, path, mod_map=None):
   """
   Write ref_to_sprinzl to a tab-separated file for inspection or hand-editing.
 
-  Format: header row (ref_name / ref_position / sprinzl_label), then one row
-  per physical reference position (1-based ref_position).  Opens directly in
-  Excel/LibreOffice with no import options needed.  Reload with
-  load_sprinzl_mapping() via --sprinzl-map; axis order is reconstructed from
-  the canonical Sprinzl numbering automatically.
+  Format: header row, then one row per physical reference position (1-based).
+  Optional 4th column modification_symbol is written when mod_map is provided.
+  Reload with load_sprinzl_mapping() via --sprinzl-map.
   """
+  has_mods = bool(mod_map)
   with open(path, 'w') as fh:
-    fh.write('ref_name\tref_position\tsprinzl_label\n')
+    header = 'ref_name\tref_position\tsprinzl_label'
+    if has_mods:
+      header += '\tmodification_symbol'
+    fh.write(header + '\n')
     for ref_name, labels in ref_to_sprinzl.items():
+      ref_mods = (mod_map or {}).get(ref_name, {})
       for pos_idx, label in enumerate(labels, start=1):
-        fh.write('{}\t{}\t{}\n'.format(ref_name, pos_idx, label))
+        row = '{}\t{}\t{}'.format(ref_name, pos_idx, label)
+        if has_mods:
+          row += '\t{}'.format(ref_mods.get(label, ''))
+        fh.write(row + '\n')
 
 
 def load_sprinzl_mapping(path):
@@ -380,8 +398,12 @@ def load_sprinzl_mapping(path):
   -------
   ref_to_sprinzl : dict[str, list[str]]
       {ref_name: [sprinzl_label, ...]} sorted by ref_position (1-based).
+  mod_map : dict[str, dict[str, str]]
+      {ref_name: {sprinzl_label: unicode_symbol}} for any rows where the
+      optional 4th column (modification_symbol) is non-empty.
   """
-  rows = {}  # {ref_name: {ref_position(int): sprinzl_label}}
+  rows = {}     # {ref_name: {ref_position(int): sprinzl_label}}
+  mod_map = {}  # {ref_name: {sprinzl_label: symbol}}
 
   with open(path) as fh:
     for line in fh:
@@ -389,9 +411,9 @@ def load_sprinzl_mapping(path):
       if line.startswith('#') or not line:
         continue
       parts = line.split('\t')
-      if len(parts) != 3:
+      if len(parts) < 3:
         continue
-      ref_name, ref_pos_str, label = parts
+      ref_name, ref_pos_str, label = parts[0], parts[1], parts[2]
       if ref_name == 'ref_name':  # skip header row
         continue
       try:
@@ -401,8 +423,11 @@ def load_sprinzl_mapping(path):
       if ref_name not in rows:
         rows[ref_name] = {}
       rows[ref_name][ref_pos] = label
+      if len(parts) >= 4 and parts[3].strip():
+        mod_map.setdefault(ref_name, {})[label] = parts[3].strip()
 
-  return {
+  ref_to_sprinzl = {
     ref_name: [label for _, label in sorted(pos_map.items())]
     for ref_name, pos_map in rows.items()
   }
+  return ref_to_sprinzl, mod_map
