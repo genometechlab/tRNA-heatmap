@@ -3,11 +3,11 @@ Heatmap generation and pileup data export for tRNA pileup data.
 
 Public API
 ----------
-  plot(rates, sprinzl_axis, ref_to_sprinzl, output_path, **kwargs)
-      Render one heatmap from per-reference mismatch-rate arrays.
+  plot(sprinzl_rates, sprinzl_axis, ref_names, no_base_sets, output_path, **kwargs)
+      Render one heatmap from Sprinzl-keyed mismatch-rate dicts.
 
-  delta(rates_by_condition, sprinzl_axis, ref_to_sprinzl, output_prefix, **kwargs)
-      Compute pairwise delta heatmaps from per-condition mismatch-rate dicts.
+  delta(sprinzl_rates_by_condition, sprinzl_axis, output_prefix, **kwargs)
+      Compute pairwise delta heatmaps from per-condition Sprinzl-keyed rate dicts.
 
   plot_sprinzl_coverage(sprinzl_axis, ref_to_sprinzl, output_path, **kwargs)
       Presence/absence heatmap showing which Sprinzl positions each tRNA covers.
@@ -15,16 +15,25 @@ Public API
 
   save_pileup(arrays, sprinzl_axis, ref_to_sprinzl, base_path)
       Save raw pileup counts (match/mm/ins/del + derived rates) as <base_path>.tsv.
+      Includes has_base column for round-trip replotting.
 
-  save_rates(rates, sprinzl_axis, ref_to_sprinzl, base_path, std_dict=None)
+  save_rates(sprinzl_rates, sprinzl_axis, ref_names, no_base_sets, base_path, std_dict=None)
       Save mismatch rates (with optional per-position std dev) as <base_path>.tsv.
+      Includes has_base column for round-trip replotting.
+
+  load_tsv(path)
+      Read a TSV written by save_pileup or save_rates and return Sprinzl-keyed
+      rate dicts ready for plot() or delta().
 
 Canonical rate representation
 -----------------------------
-  `rates` is `dict[str, np.ndarray(shape=(L,), dtype=float64)]` keyed by reference
-  name, with NaN at positions that had no coverage. Both merge modes converge on
-  this representation before plotting; total-mode keeps its raw count arrays only
-  long enough to write the count-based TSV.
+  All plotting functions use Sprinzl-keyed rate dicts:
+    sprinzl_rates : dict[str, dict[str, float]]
+      {ref_name: {sprinzl_label: mismatch_rate}}  NaN = no coverage
+    no_base_sets  : dict[str, set[str]]
+      {ref_name: {sprinzl_label, ...}}  positions where tRNA has no base (black dots)
+  BAM-derived rates are projected to this form by pipeline.project_to_sprinzl()
+  before reaching the heatmap functions.
 
 Shared keyword arguments
 ------------------------
@@ -223,7 +232,7 @@ def _build_count_matrix(arrays, sprinzl_axis, ref_to_sprinzl):
         axis 0 = [match, mismatch, insertion, deletion]
     ref_names : list[str]
     """
-    ref_names     = sorted(arrays.keys())
+    ref_names     = list(arrays.keys())
     n_sprinzl     = len(sprinzl_axis)
     sprinzl_index = {label: i for i, label in enumerate(sprinzl_axis)}
     aligned       = np.zeros((4, len(ref_names), n_sprinzl), dtype=np.float64)
@@ -257,7 +266,7 @@ def _build_rate_matrix(rate_dict, sprinzl_axis, ref_to_sprinzl):
     no_base_mask : np.ndarray (bool), shape (n_refs, n_sprinzl)
         True where the tRNA has no base at that Sprinzl position (cmalign gap).
     """
-    ref_names     = sorted(rate_dict.keys())
+    ref_names     = list(rate_dict.keys())
     n_sprinzl     = len(sprinzl_axis)
     sprinzl_index = {label: i for i, label in enumerate(sprinzl_axis)}
     matrix        = np.full((len(ref_names), n_sprinzl), np.nan)
@@ -276,11 +285,48 @@ def _build_rate_matrix(rate_dict, sprinzl_axis, ref_to_sprinzl):
     return matrix, ref_names, no_base_mask
 
 
+def _build_matrix_from_sprinzl_rates(sprinzl_rates, sprinzl_axis, ref_names, no_base_sets):
+    """
+    Build a plot matrix directly from Sprinzl-keyed rate dicts.
+
+    Parameters
+    ----------
+    sprinzl_rates : dict[str, dict[str, float]]
+        {ref_name: {sprinzl_label: mismatch_rate}}. NaN = no coverage.
+    sprinzl_axis  : list[str]
+    ref_names     : list[str]  — ordered row list (preserves include-refs order)
+    no_base_sets  : dict[str, set[str]]
+        {ref_name: {sprinzl_label, ...}} — positions with no base (black dots).
+
+    Returns
+    -------
+    matrix       : np.ndarray, shape (n_refs, n_sprinzl)
+    no_base_mask : np.ndarray (bool), shape (n_refs, n_sprinzl)
+    """
+    sprinzl_index = {lbl: i for i, lbl in enumerate(sprinzl_axis)}
+    n_refs = len(ref_names)
+    n_cols = len(sprinzl_axis)
+    matrix       = np.full((n_refs, n_cols), np.nan)
+    no_base_mask = np.zeros((n_refs, n_cols), dtype=bool)
+
+    for row_i, name in enumerate(ref_names):
+        ref_rates = sprinzl_rates.get(name, {})
+        no_base   = no_base_sets.get(name, set())
+        for lbl, col in sprinzl_index.items():
+            if lbl in no_base:
+                no_base_mask[row_i, col] = True
+            elif lbl in ref_rates:
+                val = ref_rates[lbl]
+                if not np.isnan(val):
+                    matrix[row_i, col] = val
+    return matrix, no_base_mask
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def plot(rates, sprinzl_axis, ref_to_sprinzl, output_path,
+def plot(sprinzl_rates, sprinzl_axis, ref_names, no_base_sets, output_path,
          palette='light-high',
          ylabel='tRNA Reference Names',
          title='tRNA Alignment Pileup Heatmap',
@@ -289,31 +335,34 @@ def plot(rates, sprinzl_axis, ref_to_sprinzl, output_path,
          cell_size=0.25,
          dpi=300):
     """
-    Render a single heatmap from per-reference mismatch-rate arrays.
+    Render a single heatmap from Sprinzl-keyed mismatch-rate dicts.
 
     Parameters
     ----------
-    rates : dict[str, np.ndarray]
-        {ref_name: 1D float64 array of mismatch rates, shape (L,), NaN=no coverage}.
-        Both 'total' and 'equal' merge modes converge on this representation.
+    sprinzl_rates : dict[str, dict[str, float]]
+        {ref_name: {sprinzl_label: mismatch_rate}}. NaN = no coverage.
+        Use pipeline.project_to_sprinzl() for BAM-derived rates, or
+        load_tsv() for TSV-sourced rates.
     sprinzl_axis : list[str]
         Ordered Sprinzl labels for the shared x-axis.
-    ref_to_sprinzl : dict[str, list[str]]
-        {ref_name: [sprinzl_label per ref_pos]} from get_sprinzl_mapping().
+    ref_names : list[str]
+        Ordered list of reference names for the y-axis (preserves include-refs order).
+    no_base_sets : dict[str, set[str]]
+        {ref_name: {sprinzl_label, ...}} — positions shown as black dots.
     output_path : str
         Destination file. Extension determines format (.png, .pdf, .svg).
     palette, ylabel, title, show_insertions : see module docstring.
     """
-    matrix, ref_names, no_base_mask = _build_rate_matrix(
-        rates, sprinzl_axis, ref_to_sprinzl)
+    matrix, no_base_mask = _build_matrix_from_sprinzl_rates(
+        sprinzl_rates, sprinzl_axis, ref_names, no_base_sets)
     _plot_aligned(matrix, ref_names, sprinzl_axis, output_path,
                   palette=palette, ylabel=ylabel, title=title,
                   show_insertions=show_insertions, dpi=dpi,
                   cell_size=cell_size, mod_map=mod_map, no_base_mask=no_base_mask)
 
 
-def delta(rates_by_condition, sprinzl_axis, ref_to_sprinzl,
-          output_prefix,
+def delta(sprinzl_rates_by_condition, sprinzl_axis, output_prefix,
+          no_base_sets_by_condition=None,
           palette='light-high',
           ylabel='tRNA Reference Names',
           title=None,
@@ -322,23 +371,23 @@ def delta(rates_by_condition, sprinzl_axis, ref_to_sprinzl,
           cell_size=0.25,
           dpi=300):
     """
-    Compute pairwise delta heatmaps from per-condition mismatch-rate dicts.
+    Compute pairwise delta heatmaps from per-condition Sprinzl-keyed rate dicts.
 
-    Each pair (condA, condB) produces one PDF named
-    {output_prefix_base}_{condA}_vs_{condB}{ext}. The two conditions share the
-    same Sprinzl axis (computed once by the caller); only the reference set is
-    intersected since BAMs may align to different reference subsets.
+    Each pair (condA, condB) produces one file named
+    {output_prefix}_{condA}_vs_{condB}{ext}. The reference set is intersected
+    across conditions; only refs present in all conditions are compared.
 
     Parameters
     ----------
-    rates_by_condition : dict[str, dict[str, np.ndarray]]
-        {condition_name: {ref_name: 1D rate array, NaN=no coverage}}.
+    sprinzl_rates_by_condition : dict[str, dict[str, dict[str, float]]]
+        {condition_name: {ref_name: {sprinzl_label: mismatch_rate}}}.
     sprinzl_axis : list[str]
-        Shared Sprinzl x-axis from get_sprinzl_mapping().
-    ref_to_sprinzl : dict[str, list[str]]
-        Per-reference Sprinzl mapping from get_sprinzl_mapping().
+        Shared Sprinzl x-axis.
     output_prefix : str
         File path prefix (with optional extension).
+    no_base_sets_by_condition : dict[str, dict[str, set[str]]] or None
+        {condition_name: {ref_name: {sprinzl_label, ...}}}. Black dot appears
+        if EITHER condition has no base at that position.
     title : str or None
         If None, defaults to "Delta: {condA} − {condB}" per pair.
     palette, ylabel, show_insertions, mod_map, cell_size, dpi : see plot().
@@ -346,31 +395,28 @@ def delta(rates_by_condition, sprinzl_axis, ref_to_sprinzl,
     base, ext = os.path.splitext(output_prefix)
     if not ext:
         ext = '.pdf'
+    if no_base_sets_by_condition is None:
+        no_base_sets_by_condition = {}
 
-    aligned = {
-        cond: _build_rate_matrix(rate_dict, sprinzl_axis, ref_to_sprinzl)
-        for cond, rate_dict in rates_by_condition.items()
-    }
-
-    cond_names = list(aligned.keys())
-    first_refs = aligned[cond_names[0]][1]
-    common_set = set.intersection(*(set(aligned[c][1]) for c in cond_names))
+    cond_names = list(sprinzl_rates_by_condition.keys())
+    # Intersect ref sets across all conditions, preserving order of first condition
+    first_refs = list(sprinzl_rates_by_condition[cond_names[0]].keys())
+    common_set = set.intersection(*(set(sprinzl_rates_by_condition[c].keys())
+                                    for c in cond_names))
     common_refs = [r for r in first_refs if r in common_set]
     if not common_refs:
         raise ValueError("No common reference sequences found across conditions.")
 
     for condA, condB in itertools.combinations(cond_names, 2):
-        mA, refsA, maskA = aligned[condA]
-        mB, refsB, maskB = aligned[condB]
-        idxA = {r: i for i, r in enumerate(refsA)}
-        idxB = {r: i for i, r in enumerate(refsB)}
-        rowsA = [idxA[r] for r in common_refs]
-        rowsB = [idxB[r] for r in common_refs]
+        mA, maskA = _build_matrix_from_sprinzl_rates(
+            sprinzl_rates_by_condition[condA], sprinzl_axis, common_refs,
+            no_base_sets_by_condition.get(condA, {}))
+        mB, maskB = _build_matrix_from_sprinzl_rates(
+            sprinzl_rates_by_condition[condB], sprinzl_axis, common_refs,
+            no_base_sets_by_condition.get(condB, {}))
 
-        sub_A     = mA[rowsA]
-        sub_B     = mB[rowsB]
-        delta_mat = sub_A - sub_B   # NaN propagates where either side is uncovered
-        combined_mask = maskA[rowsA] | maskB[rowsB]
+        delta_mat     = mA - mB
+        combined_mask = maskA | maskB
 
         pair_title = title if title else f"Delta: {condA} − {condB}"
         out_path   = f"{base}_{condA}_vs_{condB}{ext}"
@@ -410,7 +456,7 @@ def plot_sprinzl_coverage(sprinzl_axis, ref_to_sprinzl, output_path,
         Destination file. Extension determines format (.png, .pdf, .svg).
     palette, ylabel, title, show_insertions : see module docstring.
     """
-    ref_names     = sorted(ref_to_sprinzl.keys())
+    ref_names     = list(ref_to_sprinzl.keys())
     n_cols        = len(sprinzl_axis)
     sprinzl_index = {label: i for i, label in enumerate(sprinzl_axis)}
     matrix        = np.full((len(ref_names), n_cols), np.nan)
@@ -449,9 +495,10 @@ def save_pileup(arrays, sprinzl_axis, ref_to_sprinzl, base_path):
     TSV schema (index = seqname + sprinzl_position):
       match, mismatch, deletion, insertion,
       accuracy      = match / (match + mismatch + deletion + insertion),
-      mismatch_rate = mismatch / (match + mismatch)
+      mismatch_rate = mismatch / (match + mismatch + deletion + insertion)
     """
     aligned, ref_names = _build_count_matrix(arrays, sprinzl_axis, ref_to_sprinzl)
+    ref_label_sets = {name: set(ref_to_sprinzl.get(name, [])) for name in ref_names}
 
     rows = []
     for row_i, name in enumerate(ref_names):
@@ -464,7 +511,7 @@ def save_pileup(arrays, sprinzl_axis, ref_to_sprinzl, base_path):
             denom_acc = match + mismatch + deletion + insertion
             accuracy  = (match / denom_acc) if denom_acc > 0 else float('nan')
 
-            denom_mm = match + mismatch
+            denom_mm = match + mismatch + insertion + deletion
             mm_rate  = (mismatch / denom_mm) if denom_mm > 0 else float('nan')
 
             rows.append({
@@ -476,6 +523,7 @@ def save_pileup(arrays, sprinzl_axis, ref_to_sprinzl, base_path):
                 'insertion':        int(insertion),
                 'accuracy':         accuracy,
                 'mismatch_rate':    mm_rate,
+                'has_base':         label in ref_label_sets[name],
             })
 
     tsv_path = base_path + '.tsv'
@@ -484,35 +532,95 @@ def save_pileup(arrays, sprinzl_axis, ref_to_sprinzl, base_path):
     print(f"Pileup TSV saved to {tsv_path}")
 
 
-def save_rates(rates, sprinzl_axis, ref_to_sprinzl, base_path, std_dict=None):
+def save_rates(sprinzl_rates, sprinzl_axis, ref_names, no_base_sets, base_path,
+               std_dict=None):
     """
     Save per-position mismatch rates (and optional std deviation) to {base_path}.tsv.
 
-    TSV contains NaN where a position had no coverage across all merged replicates.
-
     TSV schema (index = seqname + sprinzl_position):
-      mismatch_rate  — averaged per-BAM mismatch rate (0–1), NaN = no coverage
-      std_dev        — per-position std deviation across BAMs (only when std_dict
-                       provided; NaN for single-BAM conditions)
+      mismatch_rate  — mismatch rate (0–1), NaN = no coverage
+      std_dev        — std deviation across BAMs (only when std_dict provided)
+      has_base       — True if the tRNA has a base at this position; False = cmalign gap
     """
-    matrix, ref_names, _ = _build_rate_matrix(rates, sprinzl_axis, ref_to_sprinzl)
-    std_matrix = None
-    if std_dict is not None:
-        std_matrix, _, _ = _build_rate_matrix(std_dict, sprinzl_axis, ref_to_sprinzl)
-
     rows = []
-    for row_i, name in enumerate(ref_names):
-        for col_i, label in enumerate(sprinzl_axis):
+    for name in ref_names:
+        ref_rates = sprinzl_rates.get(name, {})
+        ref_stds  = (std_dict or {}).get(name, {})
+        no_base   = no_base_sets.get(name, set())
+        for label in sprinzl_axis:
             row = {
                 'seqname':          name,
                 'sprinzl_position': label,
-                'mismatch_rate':    matrix[row_i, col_i],
+                'mismatch_rate':    ref_rates.get(label, float('nan')),
+                'has_base':         label not in no_base,
             }
-            if std_matrix is not None:
-                row['std_dev'] = std_matrix[row_i, col_i]
+            if std_dict is not None:
+                row['std_dev'] = ref_stds.get(label, float('nan'))
             rows.append(row)
 
     tsv_path = base_path + '.tsv'
     df = pd.DataFrame(rows).set_index(['seqname', 'sprinzl_position'])
     df.to_csv(tsv_path, sep='\t')
     print(f"Rate TSV saved to {tsv_path}")
+
+
+def load_tsv(path):
+    """
+    Read a TSV written by save_pileup or save_rates and return Sprinzl-keyed
+    rate dicts ready for plot() or delta().
+
+    Detects pileup format (has 'match' column) vs rates format automatically.
+    Reads the optional 'has_base' column to reconstruct black-dot positions;
+    older TSVs without the column produce empty no_base_sets (no black dots).
+
+    Parameters
+    ----------
+    path : str
+
+    Returns
+    -------
+    sprinzl_rates : dict[str, dict[str, float]]
+        {ref_name: {sprinzl_label: mismatch_rate}}. NaN = no coverage.
+    sprinzl_axis  : list[str]
+        Canonical-sorted union of all Sprinzl labels in the file.
+    no_base_sets  : dict[str, set[str]]
+        {ref_name: {sprinzl_label, ...}} — cmalign-gap positions (black dots).
+        Empty per ref when 'has_base' column is absent.
+    ref_names     : list[str]
+        References in the order they appear in the file (preserves include-refs order).
+    """
+    from .calculate_tRNA_positions import _sprinzl_sort_key
+
+    df = pd.read_csv(path, sep='\t')
+    is_pileup    = 'match' in df.columns
+    has_base_col = 'has_base' in df.columns
+
+    sprinzl_rates = {}
+    no_base_sets  = {}
+    ref_names     = list(dict.fromkeys(df['seqname']))  # preserves order, deduplicates
+
+    for name in ref_names:
+        sub = df[df['seqname'] == name]
+        rates   = {}
+        no_base = set()
+        for _, row in sub.iterrows():
+            label = row['sprinzl_position']
+            if is_pileup:
+                total = (row['match'] + row['mismatch']
+                         + row['insertion'] + row['deletion'])
+                rate = float(row['mismatch'] / total) if total > 0 else float('nan')
+            else:
+                rate = float(row['mismatch_rate'])
+            if has_base_col and not row['has_base']:
+                no_base.add(label)
+            else:
+                rates[label] = rate
+        sprinzl_rates[name] = rates
+        if no_base:
+            no_base_sets[name] = no_base
+
+    all_labels   = {lbl for d in sprinzl_rates.values() for lbl in d}
+    all_labels  |= {lbl for s in no_base_sets.values() for lbl in s}
+    sprinzl_axis = sorted(all_labels, key=_sprinzl_sort_key)
+
+    return sprinzl_rates, sprinzl_axis, no_base_sets, ref_names

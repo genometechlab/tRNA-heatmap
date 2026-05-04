@@ -285,8 +285,9 @@ def build_parser():
     )
     run_p.add_argument(
         "--ref", "-r",
-        required=True,
-        help="Path to reference tRNA FASTA file."
+        default=None,
+        help="Path to reference tRNA FASTA file. Required when any --condition "
+             "specifies BAM files; optional when all conditions are TSV files."
     )
     cm_group = run_p.add_mutually_exclusive_group(required=False)
     cm_group.add_argument(
@@ -436,90 +437,156 @@ def main():
 
     if args.command == 'run':
         conditions = pipeline.build_conditions(args.condition, parser.error)
-        if args.save_df and len(conditions) != 1:
-            parser.error("--save-df is only valid with exactly one condition.")
+
+        # Detect which conditions are pre-computed TSVs vs. BAM inputs.
+        tsv_conditions = {n: paths[0] for n, paths in conditions.items()
+                          if len(paths) == 1 and paths[0].endswith('.tsv')}
+        bam_conditions = {n: paths for n, paths in conditions.items()
+                          if n not in tsv_conditions}
+
+        has_bam = bool(bam_conditions)
+        has_tsv = bool(tsv_conditions)
+
+        # BAM conditions require a reference FASTA and covariance model.
+        if has_bam and not args.ref:
+            parser.error("--ref is required when any --condition specifies BAM files.")
+        if has_bam and not (args.organism or args.cm or args.sprinzl_map):
+            parser.error("--organism, --cm, or --sprinzl-map is required when any "
+                         "--condition specifies BAM files.")
+
+        # ── Collect Sprinzl-keyed rate dicts from all conditions ──────────────
+        sprinzl_rates_by_condition  = {}
+        no_base_sets_by_condition   = {}
+        counts_for_tsv              = None   # kept only for single BAM total-mode save
+        stds_for_tsv                = None   # kept only for single BAM equal-mode save
+        sprinzl_axis                = None
+        ref_to_sprinzl              = None
+        mod_map                     = None
 
         with _adapter_trim_context(args, parser) as (ref_for_cmalign, trim5, trim3):
-            # Build {cond_name: rates_dict} uniformly; keep counts only when
-            # we'll need them for the count-based TSV save (single-condition
-            # total mode).
-            rates_by_condition = {}
-            counts_for_tsv     = None
-            stds_for_tsv       = None
-            print(f"Running pileup for {len(conditions)} condition(s) "
-                  f"(merge-mode: {args.merge_mode})...")
-            for cond_name, bam_paths in conditions.items():
-                print(f"  Condition '{cond_name}': {len(bam_paths)} BAM(s)...")
-                if args.merge_mode == 'equal':
-                    r, s = pipeline.run_condition(bam_paths, args.ref, args.threads, 'equal')
-                    rates_by_condition[cond_name] = _filter_refs(
-                        pipeline.trim_arrays(r, trim5, trim3), args)
-                    if len(conditions) == 1:
-                        stds_for_tsv = _filter_refs(
-                            pipeline.trim_arrays(s, trim5, trim3), args)
-                else:
-                    c = pipeline.run_condition(bam_paths, args.ref, args.threads, 'total')
-                    c = _filter_refs(pipeline.trim_arrays(c, trim5, trim3), args)
-                    rates_by_condition[cond_name] = pipeline.counts_to_rates(c)
-                    if len(conditions) == 1:
-                        counts_for_tsv = c
 
-            sprinzl_axis, ref_to_sprinzl, mod_map = _resolve_sprinzl_mapping(
-                args, ref_for_cmalign, parser)
+            # ── BAM conditions: pileup → project to Sprinzl space ─────────────
+            if has_bam:
+                print(f"Running pileup for {len(bam_conditions)} BAM condition(s) "
+                      f"(merge-mode: {args.merge_mode})...")
+                sprinzl_axis, ref_to_sprinzl, mod_map = _resolve_sprinzl_mapping(
+                    args, ref_for_cmalign, parser)
 
-            if args.save_mapping:
-                mapping_path = _resolve_output(args.save_mapping + '.tsv', args.outdir)
-                save_sprinzl_mapping(sprinzl_axis, ref_to_sprinzl, mapping_path)
-                print(f"Saved Sprinzl mapping -> {mapping_path}")
+                if args.save_mapping:
+                    mapping_path = _resolve_output(args.save_mapping + '.tsv', args.outdir)
+                    save_sprinzl_mapping(sprinzl_axis, ref_to_sprinzl, mapping_path)
+                    print(f"Saved Sprinzl mapping -> {mapping_path}")
 
+                for cond_name, bam_paths in bam_conditions.items():
+                    print(f"  Condition '{cond_name}': {len(bam_paths)} BAM(s)...")
+                    if args.merge_mode == 'equal':
+                        r, s = pipeline.run_condition(
+                            bam_paths, args.ref, args.threads, 'equal')
+                        r = _filter_refs(pipeline.trim_arrays(r, trim5, trim3), args)
+                        s = _filter_refs(pipeline.trim_arrays(s, trim5, trim3), args)
+                        sprinzl_rates_by_condition[cond_name] = \
+                            pipeline.project_to_sprinzl(r, ref_to_sprinzl)
+                        if len(bam_conditions) == 1 and not has_tsv:
+                            stds_for_tsv = pipeline.project_to_sprinzl(s, ref_to_sprinzl)
+                    else:
+                        c = pipeline.run_condition(
+                            bam_paths, args.ref, args.threads, 'total')
+                        c = _filter_refs(pipeline.trim_arrays(c, trim5, trim3), args)
+                        sprinzl_rates_by_condition[cond_name] = \
+                            pipeline.project_to_sprinzl(
+                                pipeline.counts_to_rates(c), ref_to_sprinzl)
+                        if len(bam_conditions) == 1 and not has_tsv:
+                            counts_for_tsv = c
+
+                no_base_sets_by_condition = {
+                    cond_name: pipeline.build_no_base_sets(ref_to_sprinzl, sprinzl_axis)
+                    for cond_name in bam_conditions
+                }
+
+            # ── TSV conditions: load directly ──────────────────────────────────
+            tsv_axes = []
+            for cond_name, tsv_path in tsv_conditions.items():
+                print(f"  Condition '{cond_name}': loading from {tsv_path}...")
+                sr, ax, nb, ref_order = heatmap.load_tsv(tsv_path)
+                sr = _filter_refs(sr, args)
+                nb = {k: v for k, v in nb.items() if k in sr}
+                ref_order = [r for r in ref_order if r in sr]
+                sprinzl_rates_by_condition[cond_name] = sr
+                no_base_sets_by_condition[cond_name]  = nb
+                tsv_axes.append(ax)
+
+            # ── Merge Sprinzl axes from all sources ────────────────────────────
+            if has_tsv:
+                from .calculate_tRNA_positions import _sprinzl_sort_key
+                all_labels = set()
+                if sprinzl_axis:
+                    all_labels.update(sprinzl_axis)
+                for ax in tsv_axes:
+                    all_labels.update(ax)
+                sprinzl_axis = sorted(all_labels, key=_sprinzl_sort_key)
+
+            # ── TSV save ───────────────────────────────────────────────────────
             if args.save_df:
-                save_path = _resolve_output(args.save_df, args.outdir)
-                cond_name = next(iter(rates_by_condition))
-                if counts_for_tsv is not None:
-                    heatmap.save_pileup(counts_for_tsv, sprinzl_axis, ref_to_sprinzl, save_path)
-                else:
-                    heatmap.save_rates(rates_by_condition[cond_name], sprinzl_axis,
-                                       ref_to_sprinzl, save_path, std_dict=stds_for_tsv)
+                multi = len(conditions) > 1
+                for cond_name in conditions:
+                    suffix = f"_{cond_name}" if multi else ""
+                    save_path = _resolve_output(args.save_df + suffix, args.outdir)
+                    ref_names_for_save = list(sprinzl_rates_by_condition[cond_name])
+                    no_base_for_save   = no_base_sets_by_condition.get(cond_name, {})
+                    if cond_name not in tsv_conditions and counts_for_tsv is not None:
+                        heatmap.save_pileup(
+                            counts_for_tsv, sprinzl_axis, ref_to_sprinzl, save_path)
+                    else:
+                        heatmap.save_rates(
+                            sprinzl_rates_by_condition[cond_name],
+                            sprinzl_axis, ref_names_for_save, no_base_for_save,
+                            save_path,
+                            std_dict=stds_for_tsv if cond_name not in tsv_conditions else None)
 
             output_path = _resolve_output(args.output, args.outdir)
 
-            if len(rates_by_condition) == 1:
-                cond_name, rates = next(iter(rates_by_condition.items()))
+            # ── Build unified ref_names (preserving order) ─────────────────────
+            # Use order from first condition; later conditions may have extra refs
+            # that get NaN in the matrix (same behaviour as mismatched BAMs).
+            first_cond_rates = next(iter(sprinzl_rates_by_condition.values()))
+            all_ref_names = list(first_cond_rates.keys())
+
+            _plot_kwargs = dict(
+                palette=args.palette, ylabel=args.ylabel,
+                show_insertions=args.include_insertions,
+                dpi=args.dpi, cell_size=args.cell_size, mod_map=mod_map,
+            )
+
+            if len(sprinzl_rates_by_condition) == 1:
+                cond_name, sr = next(iter(sprinzl_rates_by_condition.items()))
                 plot_title = cond_name if args.title == _DEFAULT_TITLE else args.title
                 print(f"Generating heatmap -> {output_path}")
-                heatmap.plot(rates, sprinzl_axis, ref_to_sprinzl, output_path,
-                             palette=args.palette,
-                             ylabel=args.ylabel,
-                             title=plot_title,
-                             show_insertions=args.include_insertions,
-                             dpi=args.dpi, cell_size=args.cell_size, mod_map=mod_map)
+                heatmap.plot(sr, sprinzl_axis, all_ref_names,
+                             no_base_sets_by_condition.get(cond_name, {}),
+                             output_path, title=plot_title, **_plot_kwargs)
             else:
                 if args.individual:
                     base, ext = os.path.splitext(output_path)
                     if not ext:
                         ext = '.pdf'
-                    for cond_name, rates in rates_by_condition.items():
+                    for cond_name, sr in sprinzl_rates_by_condition.items():
                         ind_path = f"{base}_{cond_name}{ext}"
                         print(f"Generating individual heatmap -> {ind_path}")
-                        heatmap.plot(rates, sprinzl_axis, ref_to_sprinzl, ind_path,
-                                     palette=args.palette, ylabel=args.ylabel,
-                                     title=cond_name, show_insertions=args.include_insertions,
-                                     dpi=args.dpi, cell_size=args.cell_size, mod_map=mod_map)
+                        ref_names_ind = list(sr.keys())
+                        heatmap.plot(sr, sprinzl_axis, ref_names_ind,
+                                     no_base_sets_by_condition.get(cond_name, {}),
+                                     ind_path, title=cond_name, **_plot_kwargs)
 
                 delta_title = args.title if args.title != _DEFAULT_TITLE else None
-                print(f"Computing pairwise delta heatmaps for {len(rates_by_condition)} condition(s)...")
+                print(f"Computing pairwise delta heatmaps "
+                      f"for {len(sprinzl_rates_by_condition)} condition(s)...")
                 heatmap.delta(
-                    rates_by_condition=rates_by_condition,
+                    sprinzl_rates_by_condition=sprinzl_rates_by_condition,
                     sprinzl_axis=sprinzl_axis,
-                    ref_to_sprinzl=ref_to_sprinzl,
                     output_prefix=output_path,
-                    palette=args.palette,
-                    ylabel=args.ylabel,
+                    no_base_sets_by_condition=no_base_sets_by_condition,
                     title=delta_title,
-                    show_insertions=args.include_insertions,
-                    dpi=args.dpi,
-                    cell_size=args.cell_size,
-                    mod_map=mod_map,
+                    **_plot_kwargs,
                 )
 
     elif args.command == 'inspect':

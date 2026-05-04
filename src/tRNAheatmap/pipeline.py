@@ -210,7 +210,9 @@ def merge_equal(arrays_list):
             arr   = a[name]
             match = arr[0].astype(np.float64)
             mm    = arr[1].astype(np.float64)
-            total = match + mm
+            ins   = arr[2].astype(np.float64)
+            dele  = arr[3].astype(np.float64)
+            total = match + mm + ins + dele
             with np.errstate(invalid='ignore', divide='ignore'):
                 per_bam.append(np.where(total > 0, mm / total, np.nan))
         with np.errstate(all='ignore'):
@@ -232,10 +234,60 @@ def counts_to_rates(count_arrays):
     for name, arr in count_arrays.items():
         match = arr[0].astype(np.float64)
         mm    = arr[1].astype(np.float64)
-        total = match + mm
+        ins   = arr[2].astype(np.float64)
+        dele  = arr[3].astype(np.float64)
+        total = match + mm + ins + dele
         with np.errstate(invalid='ignore', divide='ignore'):
             rates[name] = np.where(total > 0, mm / total, np.nan)
     return rates
+
+
+def project_to_sprinzl(rate_dict, ref_to_sprinzl):
+    """
+    Convert physical-position rate arrays to Sprinzl-keyed rate dicts.
+
+    Parameters
+    ----------
+    rate_dict : dict[str, np.ndarray]
+        {ref_name: 1D float64 rate array indexed by physical position}.
+    ref_to_sprinzl : dict[str, list[str]]
+        {ref_name: [sprinzl_label per physical position]}.
+
+    Returns
+    -------
+    dict[str, dict[str, float]]
+        {ref_name: {sprinzl_label: mismatch_rate}} with NaN where uncovered.
+    """
+    result = {}
+    for name, rates in rate_dict.items():
+        labels = ref_to_sprinzl.get(name, [])
+        result[name] = {
+            label: float(rates[i]) if i < len(rates) else float('nan')
+            for i, label in enumerate(labels)
+        }
+    return result
+
+
+def build_no_base_sets(ref_to_sprinzl, sprinzl_axis):
+    """
+    Build per-ref sets of Sprinzl labels where the tRNA has no base (cmalign gap).
+
+    Parameters
+    ----------
+    ref_to_sprinzl : dict[str, list[str]]
+    sprinzl_axis   : list[str]
+
+    Returns
+    -------
+    dict[str, set[str]]
+        {ref_name: {sprinzl_label, ...}} — labels in sprinzl_axis absent from
+        the ref's mapping. These positions render as black dots in the heatmap.
+    """
+    axis_set = set(sprinzl_axis)
+    return {
+        name: axis_set - set(labels)
+        for name, labels in ref_to_sprinzl.items()
+    }
 
 
 def run_condition(bam_paths, ref, threads, merge_mode):
