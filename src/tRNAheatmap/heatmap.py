@@ -95,7 +95,8 @@ def _plot_aligned(matrix, ref_names, sprinzl_axis, output_path,
                   seq_fontsize=5.0,
                   mod_map=None,
                   cell_size=0.25,
-                  dpi=300):
+                  dpi=300,
+                  metric='mismatch'):
     """
     Render and save a heatmap from a pre-aligned metric matrix.
 
@@ -147,6 +148,7 @@ def _plot_aligned(matrix, ref_names, sprinzl_axis, output_path,
 
     # pcolormesh renders vector rectangles in PDF (no raster interpolation blur)
     im = ax.pcolormesh(matrix, cmap=cmap_obj, vmin=vmin, vmax=vmax)
+    ax.set_aspect('equal')   # force square cells regardless of figure size
     ax.set_xlim(0, n_cols)
     ax.set_ylim(n_refs, 0)   # top-to-bottom row order, matching imshow convention
 
@@ -163,7 +165,10 @@ def _plot_aligned(matrix, ref_names, sprinzl_axis, output_path,
     cbar = fig.colorbar(im, cax=cax)
     cbar.ax.tick_params()
     if cbar_label is None:
-        cbar_label = 'Mismatch rate' if vmin == 0 else 'Δ Mismatch rate'
+        if metric == 'match':
+            cbar_label = 'Reference match rate' if vmin == 0 else 'Δ Reference match rate'
+        else:
+            cbar_label = 'Mismatch rate' if vmin == 0 else 'Δ Mismatch rate'
     cbar.ax.set_ylabel(cbar_label, labelpad=10, rotation=270, va='bottom')
 
     # pcolormesh cell centres at i+0.5
@@ -333,7 +338,8 @@ def plot(sprinzl_rates, sprinzl_axis, ref_names, no_base_sets, output_path,
          show_insertions=False,
          mod_map=None,
          cell_size=0.25,
-         dpi=300):
+         dpi=300,
+         metric='mismatch'):
     """
     Render a single heatmap from Sprinzl-keyed mismatch-rate dicts.
 
@@ -358,7 +364,8 @@ def plot(sprinzl_rates, sprinzl_axis, ref_names, no_base_sets, output_path,
     _plot_aligned(matrix, ref_names, sprinzl_axis, output_path,
                   palette=palette, ylabel=ylabel, title=title,
                   show_insertions=show_insertions, dpi=dpi,
-                  cell_size=cell_size, mod_map=mod_map, no_base_mask=no_base_mask)
+                  cell_size=cell_size, mod_map=mod_map, no_base_mask=no_base_mask,
+                  metric=metric)
 
 
 def delta(sprinzl_rates_by_condition, sprinzl_axis, output_prefix,
@@ -369,7 +376,8 @@ def delta(sprinzl_rates_by_condition, sprinzl_axis, output_prefix,
           show_insertions=False,
           mod_map=None,
           cell_size=0.25,
-          dpi=300):
+          dpi=300,
+          metric='mismatch'):
     """
     Compute pairwise delta heatmaps from per-condition Sprinzl-keyed rate dicts.
 
@@ -425,7 +433,8 @@ def delta(sprinzl_rates_by_condition, sprinzl_axis, output_prefix,
                       ylabel=ylabel, title=pair_title,
                       show_insertions=show_insertions, dpi=dpi,
                       cell_size=cell_size, mod_map=mod_map,
-                      no_base_mask=combined_mask)
+                      no_base_mask=combined_mask,
+                      metric=metric)
 
 
 def plot_sprinzl_coverage(sprinzl_axis, ref_to_sprinzl, output_path,

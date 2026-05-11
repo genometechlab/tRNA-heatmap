@@ -33,18 +33,21 @@ def initialize_numpy_array(header):
 def _pileup(bam,
             ref_path,
             threads,
-            thread_index):
+            thread_index,
+            min_q=0):
 
     ref_file = pysam.FastxFile(ref_path)
     ref_seqs = {}
     for seq in ref_file:
         ref_seqs[seq.name] = seq.sequence
-    
+
     alignment_file = pysam.AlignmentFile(bam)
     ref_array = initialize_numpy_array(alignment_file.header)
 
     for read in alignment_file:
         if read.is_unmapped or read.is_secondary or read.is_supplementary or read.is_reverse:
+            continue
+        if read.mapping_quality < min_q:
             continue
         if not hash_readid(read.query_name, threads, thread_index):
             continue
@@ -87,12 +90,13 @@ def _pileup(bam,
     return ref_array
     
 def _pileup_wrapper(args):
-    bam, ref_path, threads, thread_index = args
-    
+    bam, ref_path, threads, thread_index, min_q = args
+
     return _pileup(bam,
                    ref_path,
                    threads,
-                   thread_index)
+                   thread_index,
+                   min_q)
 
 def _merge_arrays(arrays):
     template_array = arrays[0]
@@ -101,9 +105,9 @@ def _merge_arrays(arrays):
             template_array[key] += arr_dict[key]
     return template_array
 
-def pileup(bam, ref_path, threads):
+def pileup(bam, ref_path, threads, min_q=0):
 
-    args = [(bam, ref_path, threads, i) for i in range(threads)]
+    args = [(bam, ref_path, threads, i, min_q) for i in range(threads)]
 
     with multiprocessing.Pool(threads) as p:
         arrays = p.map(_pileup_wrapper, args)

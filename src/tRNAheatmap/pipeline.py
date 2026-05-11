@@ -195,9 +195,16 @@ def merge_total(arrays_list):
     return merged
 
 
-def merge_equal(arrays_list):
+def merge_equal(arrays_list, metric='mismatch'):
     """
-    Average per-BAM mismatch rates per position.
+    Average per-BAM rates per position.
+
+    Parameters
+    ----------
+    arrays_list : list[dict[str, (4, L) array]]
+    metric : 'mismatch' (default) or 'match'
+        'mismatch' → numerator is arr[1] (mismatch).
+        'match'    → numerator is arr[0] (match), yielding reference-match rate.
 
     Returns (means, stds) — two dicts mapping ref_name → 1D float64 array.
     NaN where a position had no coverage in any replicate.
@@ -213,8 +220,9 @@ def merge_equal(arrays_list):
             ins   = arr[2].astype(np.float64)
             dele  = arr[3].astype(np.float64)
             total = match + mm + ins + dele
+            numerator = match if metric == 'match' else mm
             with np.errstate(invalid='ignore', divide='ignore'):
-                per_bam.append(np.where(total > 0, mm / total, np.nan))
+                per_bam.append(np.where(total > 0, numerator / total, np.nan))
         with np.errstate(all='ignore'):
             means[name] = np.nanmean(per_bam, axis=0)
             stds[name]  = (np.nanstd(per_bam, axis=0) if len(per_bam) > 1
@@ -239,6 +247,25 @@ def counts_to_rates(count_arrays):
         total = match + mm + ins + dele
         with np.errstate(invalid='ignore', divide='ignore'):
             rates[name] = np.where(total > 0, mm / total, np.nan)
+    return rates
+
+
+def counts_to_accuracy(count_arrays):
+    """
+    Convert {name: (4, L) count array} to {name: (L,) accuracy array}.
+
+    accuracy = match / (match + mismatch + insertion + deletion). NaN where
+    a position had no coverage.
+    """
+    rates = {}
+    for name, arr in count_arrays.items():
+        match = arr[0].astype(np.float64)
+        mm    = arr[1].astype(np.float64)
+        ins   = arr[2].astype(np.float64)
+        dele  = arr[3].astype(np.float64)
+        total = match + mm + ins + dele
+        with np.errstate(invalid='ignore', divide='ignore'):
+            rates[name] = np.where(total > 0, match / total, np.nan)
     return rates
 
 
@@ -290,11 +317,21 @@ def build_no_base_sets(ref_to_sprinzl, sprinzl_axis):
     }
 
 
-def run_condition(bam_paths, ref, threads, merge_mode):
-    """Run pileup for each BAM in a condition, then merge."""
-    arrays_list = [pileup(b, ref, threads) for b in bam_paths]
+def run_condition(bam_paths, ref, threads, merge_mode, min_q=0, metric='mismatch'):
+    """
+    Run pileup for each BAM in a condition, then merge.
+
+    Parameters
+    ----------
+    bam_paths, ref, threads : see pileup_engine.pileup.
+    merge_mode : 'total' or 'equal'.
+    min_q : minimum MAPQ; reads below are skipped during pileup.
+    metric : 'mismatch' (default) or 'match'. Only consulted in 'equal' mode;
+        'total' mode returns raw counts and the caller chooses the conversion.
+    """
+    arrays_list = [pileup(b, ref, threads, min_q) for b in bam_paths]
     if merge_mode == 'equal':
-        return merge_equal(arrays_list)
+        return merge_equal(arrays_list, metric=metric)
     return merge_total(arrays_list)
 
 

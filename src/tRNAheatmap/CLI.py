@@ -84,6 +84,16 @@ def _add_plot_flags(p):
              "They are always stored in TSV files."
     )
     p.add_argument(
+        "--reference-match",
+        action="store_true",
+        dest="reference_match",
+        help="Plot reference match proportion (match / (match+mismatch+ins+del)) "
+             "instead of mismatch rate. Colorbar label updates accordingly. "
+             "Delta plots become Δ Reference match rate. Note: the TSV "
+             "'mismatch_rate' column name is unchanged; with this flag its "
+             "values hold the match rate instead."
+    )
+    p.add_argument(
         "--dpi",
         type=int,
         default=300,
@@ -330,6 +340,15 @@ def build_parser():
         default=1,
         help="Threads for pileup engine. Default: 1"
     )
+    run_p.add_argument(
+        "--min-q",
+        type=int,
+        default=0,
+        dest="min_q",
+        metavar="INT",
+        help="Minimum MAPQ for a read to be included in the pileup. "
+             "Reads with mapping_quality < min_q are skipped. Default: 0 (no filter)."
+    )
     _add_adapter_flags(run_p)
     _add_sprinzl_override_flags(run_p)
     _add_condition_flags(run_p)
@@ -477,11 +496,13 @@ def main():
                     save_sprinzl_mapping(sprinzl_axis, ref_to_sprinzl, mapping_path)
                     print(f"Saved Sprinzl mapping -> {mapping_path}")
 
+                metric = 'match' if args.reference_match else 'mismatch'
                 for cond_name, bam_paths in bam_conditions.items():
                     print(f"  Condition '{cond_name}': {len(bam_paths)} BAM(s)...")
                     if args.merge_mode == 'equal':
                         r, s = pipeline.run_condition(
-                            bam_paths, args.ref, args.threads, 'equal')
+                            bam_paths, args.ref, args.threads, 'equal',
+                            min_q=args.min_q, metric=metric)
                         r = _filter_refs(pipeline.trim_arrays(r, trim5, trim3), args)
                         s = _filter_refs(pipeline.trim_arrays(s, trim5, trim3), args)
                         sprinzl_rates_by_condition[cond_name] = \
@@ -490,11 +511,13 @@ def main():
                             stds_for_tsv = pipeline.project_to_sprinzl(s, ref_to_sprinzl)
                     else:
                         c = pipeline.run_condition(
-                            bam_paths, args.ref, args.threads, 'total')
+                            bam_paths, args.ref, args.threads, 'total',
+                            min_q=args.min_q)
                         c = _filter_refs(pipeline.trim_arrays(c, trim5, trim3), args)
+                        rate_fn = (pipeline.counts_to_accuracy if args.reference_match
+                                   else pipeline.counts_to_rates)
                         sprinzl_rates_by_condition[cond_name] = \
-                            pipeline.project_to_sprinzl(
-                                pipeline.counts_to_rates(c), ref_to_sprinzl)
+                            pipeline.project_to_sprinzl(rate_fn(c), ref_to_sprinzl)
                         if len(bam_conditions) == 1 and not has_tsv:
                             counts_for_tsv = c
 
@@ -555,6 +578,7 @@ def main():
                 palette=args.palette, ylabel=args.ylabel,
                 show_insertions=args.include_insertions,
                 dpi=args.dpi, cell_size=args.cell_size, mod_map=mod_map,
+                metric='match' if args.reference_match else 'mismatch',
             )
 
             if len(sprinzl_rates_by_condition) == 1:
