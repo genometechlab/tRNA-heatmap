@@ -146,8 +146,8 @@ def _plot_aligned(matrix, ref_names, sprinzl_axis, output_path,
     fig_h = max(3.0, n_refs * cell_size + 2.0)
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-    # pcolormesh renders vector rectangles in PDF (no raster interpolation blur)
-    im = ax.pcolormesh(matrix, cmap=cmap_obj, vmin=vmin, vmax=vmax)
+    im = ax.pcolormesh(matrix, cmap=cmap_obj, vmin=vmin, vmax=vmax,
+                       edgecolors='face', linewidth=0, rasterized=True)
     ax.set_aspect('equal')   # force square cells regardless of figure size
     ax.set_xlim(0, n_cols)
     ax.set_ylim(n_refs, 0)   # top-to-bottom row order, matching imshow convention

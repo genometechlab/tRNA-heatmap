@@ -112,6 +112,9 @@ lines.markersize : 6.0
 scatter.marker   : o
 
 
+patch.linewidth : 0
+
+
 ## ── Image / Colormap ────────────────────────────────────────────────────────
 # Default colormap used when no --palette is specified.
 # Note: --palette (light-high, dark-high, viridis) overrides this entirely.
