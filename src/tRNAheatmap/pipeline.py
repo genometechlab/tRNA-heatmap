@@ -65,6 +65,35 @@ def read_fasta_dict(path):
     return {k: ''.join(v) for k, v in seqs.items()}
 
 
+def build_ref_name_map(per_cond_trimmed_seqs):
+    """
+    Build per-condition rename maps based on post-trim sequence identity.
+
+    First occurrence of each unique trimmed sequence determines the canonical
+    name. Refs unique to one condition keep their own name (canonical = orig).
+
+    Parameters
+    ----------
+    per_cond_trimmed_seqs : dict[str, dict[str, str]]
+        {cond_name: {ref_name: trimmed_sequence}}
+
+    Returns
+    -------
+    dict[str, dict[str, str]]
+        {cond_name: {orig_ref_name: canonical_name}}
+    """
+    seq_to_canonical = {}
+    per_cond_renames = {}
+    for cond_name, seqs in per_cond_trimmed_seqs.items():
+        renames = {}
+        for ref_name, seq in seqs.items():
+            if seq not in seq_to_canonical:
+                seq_to_canonical[seq] = ref_name
+            renames[ref_name] = seq_to_canonical[seq]
+        per_cond_renames[cond_name] = renames
+    return per_cond_renames
+
+
 def detect_adapters(sequences):
     """
     Find common 5' prefix and 3' suffix lengths across all sequences.
