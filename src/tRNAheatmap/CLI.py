@@ -339,8 +339,10 @@ def build_parser():
         "--save-df", "-s",
         default=None,
         dest="save_df",
-        help="Base name (no extension) to save pileup data as a .tsv file. "
-             "Only valid with exactly one condition."
+        help="Base name (no extension) to save pileup/rate data as .tsv file(s). "
+             "With one --condition: BASE.tsv. With ≥ 2 --condition groups: "
+             "BASE_{condition}.tsv per condition, plus BASE_{condA}_vs_{condB}.tsv "
+             "with the pairwise delta values for each pair."
     )
     run_p.add_argument(
         "--individual",
@@ -666,6 +668,12 @@ def main():
                         sprinzl_axis, ref_names_for_save, no_base_for_save,
                         save_path,
                         std_dict=stds_for_tsv if cond_name not in tsv_conditions else None)
+
+            if multi:
+                delta_prefix = _resolve_output(args.save_df, args.outdir)
+                heatmap.save_deltas(
+                    sprinzl_rates_by_condition, sprinzl_axis, delta_prefix,
+                    no_base_sets_by_condition)
 
         output_path = _resolve_output(args.output, args.outdir)
 

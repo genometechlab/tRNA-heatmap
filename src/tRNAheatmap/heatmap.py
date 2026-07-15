@@ -21,6 +21,10 @@ Public API
       Save mismatch rates (with optional per-position std dev) as <base_path>.tsv.
       Includes has_base column for round-trip replotting.
 
+  save_deltas(sprinzl_rates_by_condition, sprinzl_axis, output_prefix, no_base_sets_by_condition=None)
+      Save pairwise delta values (condA − condB) as <prefix>_<condA>_vs_<condB>.tsv,
+      mirroring the pairing/reference-intersection logic of delta().
+
   load_tsv(path)
       Read a TSV written by save_pileup or save_rates and return Sprinzl-keyed
       rate dicts ready for plot() or delta().
@@ -368,6 +372,37 @@ def plot(sprinzl_rates, sprinzl_axis, ref_names, no_base_sets, output_path,
                   metric=metric)
 
 
+def _common_refs_across_conditions(sprinzl_rates_by_condition):
+    """
+    Intersect reference sets across all conditions, preserving the order of
+    the first condition. Raises ValueError if the intersection is empty.
+    """
+    cond_names = list(sprinzl_rates_by_condition.keys())
+    first_refs = list(sprinzl_rates_by_condition[cond_names[0]].keys())
+    common_set = set.intersection(*(set(sprinzl_rates_by_condition[c].keys())
+                                    for c in cond_names))
+    common_refs = [r for r in first_refs if r in common_set]
+    if not common_refs:
+        raise ValueError("No common reference sequences found across conditions.")
+    return common_refs
+
+
+def _pair_delta(sprinzl_rates_by_condition, sprinzl_axis, common_refs,
+                 no_base_sets_by_condition, condA, condB):
+    """
+    Build the (condA − condB) matrix and combined no-base mask for one pair.
+
+    Returns (delta_mat, combined_mask), both shape (len(common_refs), len(sprinzl_axis)).
+    """
+    mA, maskA = _build_matrix_from_sprinzl_rates(
+        sprinzl_rates_by_condition[condA], sprinzl_axis, common_refs,
+        no_base_sets_by_condition.get(condA, {}))
+    mB, maskB = _build_matrix_from_sprinzl_rates(
+        sprinzl_rates_by_condition[condB], sprinzl_axis, common_refs,
+        no_base_sets_by_condition.get(condB, {}))
+    return mA - mB, maskA | maskB
+
+
 def delta(sprinzl_rates_by_condition, sprinzl_axis, output_prefix,
           no_base_sets_by_condition=None,
           palette='light-high',
@@ -406,25 +441,13 @@ def delta(sprinzl_rates_by_condition, sprinzl_axis, output_prefix,
     if no_base_sets_by_condition is None:
         no_base_sets_by_condition = {}
 
-    cond_names = list(sprinzl_rates_by_condition.keys())
-    # Intersect ref sets across all conditions, preserving order of first condition
-    first_refs = list(sprinzl_rates_by_condition[cond_names[0]].keys())
-    common_set = set.intersection(*(set(sprinzl_rates_by_condition[c].keys())
-                                    for c in cond_names))
-    common_refs = [r for r in first_refs if r in common_set]
-    if not common_refs:
-        raise ValueError("No common reference sequences found across conditions.")
+    cond_names  = list(sprinzl_rates_by_condition.keys())
+    common_refs = _common_refs_across_conditions(sprinzl_rates_by_condition)
 
     for condA, condB in itertools.combinations(cond_names, 2):
-        mA, maskA = _build_matrix_from_sprinzl_rates(
-            sprinzl_rates_by_condition[condA], sprinzl_axis, common_refs,
-            no_base_sets_by_condition.get(condA, {}))
-        mB, maskB = _build_matrix_from_sprinzl_rates(
-            sprinzl_rates_by_condition[condB], sprinzl_axis, common_refs,
-            no_base_sets_by_condition.get(condB, {}))
-
-        delta_mat     = mA - mB
-        combined_mask = maskA | maskB
+        delta_mat, combined_mask = _pair_delta(
+            sprinzl_rates_by_condition, sprinzl_axis, common_refs,
+            no_base_sets_by_condition, condA, condB)
 
         pair_title = title if title else f"Delta: {condA} − {condB}"
         out_path   = f"{base}_{condA}_vs_{condB}{ext}"
@@ -571,6 +594,49 @@ def save_rates(sprinzl_rates, sprinzl_axis, ref_names, no_base_sets, base_path,
     df = pd.DataFrame(rows).set_index(['seqname', 'sprinzl_position'])
     df.to_csv(tsv_path, sep='\t')
     print(f"Rate TSV saved to {tsv_path}")
+
+
+def save_deltas(sprinzl_rates_by_condition, sprinzl_axis, output_prefix,
+                 no_base_sets_by_condition=None):
+    """
+    Save pairwise delta values (condA − condB) as {prefix}_{condA}_vs_{condB}.tsv.
+
+    Mirrors delta()'s pairing/reference-intersection/mask logic exactly, so the
+    exported numbers match what the corresponding delta heatmap plots.
+
+    TSV schema (index = seqname + sprinzl_position):
+      mismatch_rate_delta — condA rate minus condB rate. Name is unchanged
+                            under --reference-match; values hold the match-rate
+                            delta instead (same convention as save_rates).
+      has_base            — False if EITHER condition lacks a base here
+                            (cmalign gap), matching the heatmap's black dots.
+    """
+    base, _ = os.path.splitext(output_prefix)
+    if no_base_sets_by_condition is None:
+        no_base_sets_by_condition = {}
+
+    cond_names  = list(sprinzl_rates_by_condition.keys())
+    common_refs = _common_refs_across_conditions(sprinzl_rates_by_condition)
+
+    for condA, condB in itertools.combinations(cond_names, 2):
+        delta_mat, combined_mask = _pair_delta(
+            sprinzl_rates_by_condition, sprinzl_axis, common_refs,
+            no_base_sets_by_condition, condA, condB)
+
+        rows = []
+        for row_i, name in enumerate(common_refs):
+            for col_i, label in enumerate(sprinzl_axis):
+                rows.append({
+                    'seqname':             name,
+                    'sprinzl_position':    label,
+                    'mismatch_rate_delta': delta_mat[row_i, col_i],
+                    'has_base':            not combined_mask[row_i, col_i],
+                })
+
+        tsv_path = f"{base}_{condA}_vs_{condB}.tsv"
+        df = pd.DataFrame(rows).set_index(['seqname', 'sprinzl_position'])
+        df.to_csv(tsv_path, sep='\t')
+        print(f"Delta TSV saved to {tsv_path}")
 
 
 def load_tsv(path):
