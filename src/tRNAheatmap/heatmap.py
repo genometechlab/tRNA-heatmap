@@ -100,7 +100,10 @@ def _plot_aligned(matrix, ref_names, sprinzl_axis, output_path,
                   mod_map=None,
                   cell_size=0.25,
                   dpi=300,
-                  metric='mismatch'):
+                  metric='mismatch',
+                  annotate=False,
+                  annotate_fontsize=5.0,
+                  annotate_threshold=0.0):
     """
     Render and save a heatmap from a pre-aligned metric matrix.
 
@@ -223,6 +226,27 @@ def _plot_aligned(matrix, ref_names, sprinzl_axis, output_path,
                             fontsize=seq_fontsize, color='white', fontweight='bold',
                             zorder=3)
 
+    # --- Numeric value annotations (--annotate) ---
+    if annotate:
+        is_delta = vmin < 0   # delta plots use vmin=-1; signed formatting
+        for row_i in range(n_refs):
+            for col_i in range(n_cols):
+                if (row_i, col_i) in mod_cells:
+                    continue
+                if no_base_mask is not None and no_base_mask[row_i, col_i]:
+                    continue
+                val = matrix[row_i, col_i]
+                if np.isnan(val) or abs(val) < annotate_threshold:
+                    continue
+                norm = np.clip((val - vmin) / (vmax - vmin), 0, 1)
+                r, g, b, _ = cmap_obj(norm)
+                text_color = 'white' if (0.299*r + 0.587*g + 0.114*b) < 0.5 else 'black'
+                label = f"{val:+.2f}" if is_delta else f"{val:.2f}"
+                ax.text(col_i + 0.5, row_i + 0.5, label,
+                        ha='center', va='center',
+                        fontsize=annotate_fontsize, color=text_color,
+                        zorder=3)
+
     plt.tight_layout()
     plt.savefig(output_path, dpi=dpi, transparent=True)
     plt.close(fig)
@@ -343,7 +367,10 @@ def plot(sprinzl_rates, sprinzl_axis, ref_names, no_base_sets, output_path,
          mod_map=None,
          cell_size=0.25,
          dpi=300,
-         metric='mismatch'):
+         metric='mismatch',
+         annotate=False,
+         annotate_fontsize=5.0,
+         annotate_threshold=0.0):
     """
     Render a single heatmap from Sprinzl-keyed mismatch-rate dicts.
 
@@ -369,7 +396,9 @@ def plot(sprinzl_rates, sprinzl_axis, ref_names, no_base_sets, output_path,
                   palette=palette, ylabel=ylabel, title=title,
                   show_insertions=show_insertions, dpi=dpi,
                   cell_size=cell_size, mod_map=mod_map, no_base_mask=no_base_mask,
-                  metric=metric)
+                  metric=metric, annotate=annotate,
+                  annotate_fontsize=annotate_fontsize,
+                  annotate_threshold=annotate_threshold)
 
 
 def _common_refs_across_conditions(sprinzl_rates_by_condition):
@@ -412,7 +441,10 @@ def delta(sprinzl_rates_by_condition, sprinzl_axis, output_prefix,
           mod_map=None,
           cell_size=0.25,
           dpi=300,
-          metric='mismatch'):
+          metric='mismatch',
+          annotate=False,
+          annotate_fontsize=5.0,
+          annotate_threshold=0.0):
     """
     Compute pairwise delta heatmaps from per-condition Sprinzl-keyed rate dicts.
 
@@ -457,7 +489,9 @@ def delta(sprinzl_rates_by_condition, sprinzl_axis, output_prefix,
                       show_insertions=show_insertions, dpi=dpi,
                       cell_size=cell_size, mod_map=mod_map,
                       no_base_mask=combined_mask,
-                      metric=metric)
+                      metric=metric, annotate=annotate,
+                      annotate_fontsize=annotate_fontsize,
+                      annotate_threshold=annotate_threshold)
 
 
 def plot_sprinzl_coverage(sprinzl_axis, ref_to_sprinzl, output_path,

@@ -95,6 +95,33 @@ def _add_plot_flags(p):
              "values hold the match rate instead."
     )
     p.add_argument(
+        "--annotate",
+        action="store_true",
+        dest="annotate",
+        help="Print each cell's numeric value on the heatmap. Delta cells are "
+             "shown signed (e.g. +0.42); rate cells unsigned (e.g. 0.42). "
+             "Cells with a modification symbol keep the symbol; no-coverage and "
+             "no-base cells stay blank."
+    )
+    p.add_argument(
+        "--annotate-fontsize",
+        dest="annotate_fontsize",
+        type=float,
+        default=5.0,
+        metavar="FLOAT",
+        help="Font size for numbers drawn with --annotate. Default: 5.0."
+    )
+    p.add_argument(
+        "--annotate-threshold",
+        dest="annotate_threshold",
+        type=float,
+        default=0.0,
+        metavar="FLOAT",
+        help="With --annotate, only print a cell's value when its absolute value "
+             "is greater than or equal to this threshold. Default: 0.0 (print all "
+             "covered cells, including exact-zero deltas)."
+    )
+    p.add_argument(
         "--dpi",
         type=int,
         default=300,
@@ -688,6 +715,9 @@ def main():
             show_insertions=args.include_insertions,
             dpi=args.dpi, cell_size=args.cell_size, mod_map=mod_map,
             metric='match' if args.reference_match else 'mismatch',
+            annotate=args.annotate,
+            annotate_fontsize=args.annotate_fontsize,
+            annotate_threshold=args.annotate_threshold,
         )
 
         if len(sprinzl_rates_by_condition) == 1:
