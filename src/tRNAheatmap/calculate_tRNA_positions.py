@@ -47,6 +47,7 @@ Public API
       Returns (sprinzl_axis_or_None, ref_to_sprinzl).
 """
 
+import heapq
 import re
 import subprocess
 import tempfile
@@ -346,16 +347,67 @@ def _sprinzl_sort_key(label):
   return (_CANONICAL_RANK.get(label, len(_CANONICAL_SPRINZL)), 0, 0)
 
 
+def merge_axes(ordered_label_lists):
+  """
+  Merge several ordered label lists into one axis that respects every list's order.
+
+  Each list (one tRNA's labels 5'->3', or a previously built axis) contributes
+  "a comes before b" constraints for consecutive labels. Labels are emitted in
+  topological order, with _sprinzl_sort_key (then first appearance) choosing
+  among labels that are ready at the same time. This places labels missing from
+  _CANONICAL_SPRINZL (e.g. V6-V10 in a sequential V-arm numbering, or custom
+  intron labels like 'I1') where they physically occur rather than at the end.
+  If the lists contradict each other, the cycle is broken by sort key.
+  """
+  first_seen = {}
+  succ = {}
+  indegree = {}
+  for labels in ordered_label_lists:
+    prev = None
+    for lbl in labels:
+      if lbl not in first_seen:
+        first_seen[lbl] = len(first_seen)
+        succ[lbl] = set()
+        indegree[lbl] = 0
+      if prev is not None and prev != lbl and lbl not in succ[prev]:
+        succ[prev].add(lbl)
+        indegree[lbl] += 1
+      prev = lbl
+
+  def key(lbl):
+    return (_sprinzl_sort_key(lbl), first_seen[lbl])
+
+  ready = [(key(l), l) for l, d in indegree.items() if d == 0]
+  heapq.heapify(ready)
+  remaining = set(first_seen)
+  axis = []
+  while remaining:
+    if not ready:
+      # Contradictory orderings: break the cycle at the lowest-ranked label.
+      lbl = min(remaining, key=key)
+      heapq.heappush(ready, (key(lbl), lbl))
+    _, lbl = heapq.heappop(ready)
+    if lbl not in remaining:
+      continue
+    remaining.discard(lbl)
+    axis.append(lbl)
+    for nxt in succ[lbl]:
+      if nxt in remaining:
+        indegree[nxt] -= 1
+        if indegree[nxt] == 0:
+          heapq.heappush(ready, (key(nxt), nxt))
+  return axis
+
+
 def build_axis_from_mapping(ref_to_sprinzl):
   """
   Derive an ordered sprinzl_axis from the union of labels in ref_to_sprinzl.
 
   Used when loading a hand-edited mapping TSV without running cmalign —
-  the axis order is reconstructed from the canonical Sprinzl numbering rather
-  than stored in the file.
+  the axis order is reconstructed from each reference's physical label order,
+  using the canonical Sprinzl numbering only to break ties (see merge_axes).
   """
-  all_labels = {lbl for labels in ref_to_sprinzl.values() for lbl in labels}
-  return sorted(all_labels, key=_sprinzl_sort_key)
+  return merge_axes(ref_to_sprinzl.values())
 
 
 # ---------------------------------------------------------------------------

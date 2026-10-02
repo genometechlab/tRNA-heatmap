@@ -691,14 +691,14 @@ def load_tsv(path):
     sprinzl_rates : dict[str, dict[str, float]]
         {ref_name: {sprinzl_label: mismatch_rate}}. NaN = no coverage.
     sprinzl_axis  : list[str]
-        Canonical-sorted union of all Sprinzl labels in the file.
+        Union of all Sprinzl labels in the file, in file row order (see merge_axes).
     no_base_sets  : dict[str, set[str]]
         {ref_name: {sprinzl_label, ...}} — cmalign-gap positions (black dots).
         Empty per ref when 'has_base' column is absent.
     ref_names     : list[str]
         References in the order they appear in the file (preserves include-refs order).
     """
-    from .calculate_tRNA_positions import _sprinzl_sort_key
+    from .calculate_tRNA_positions import merge_axes
 
     df = pd.read_csv(path, sep='\t')
     is_pileup    = 'match' in df.columns
@@ -728,8 +728,8 @@ def load_tsv(path):
         if no_base:
             no_base_sets[name] = no_base
 
-    all_labels   = {lbl for d in sprinzl_rates.values() for lbl in d}
-    all_labels  |= {lbl for s in no_base_sets.values() for lbl in s}
-    sprinzl_axis = sorted(all_labels, key=_sprinzl_sort_key)
+    # Rows are written in axis order, so each ref's row order is its label order.
+    sprinzl_axis = merge_axes(
+        list(df.loc[df['seqname'] == name, 'sprinzl_position']) for name in ref_names)
 
     return sprinzl_rates, sprinzl_axis, no_base_sets, ref_names

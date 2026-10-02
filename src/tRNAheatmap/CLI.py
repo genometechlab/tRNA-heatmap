@@ -39,7 +39,7 @@ import os
 
 from .calculate_tRNA_positions import (get_sprinzl_mapping, save_sprinzl_mapping,
                                         load_sprinzl_mapping, build_axis_from_mapping,
-                                        _sprinzl_sort_key)
+                                        merge_axes)
 import matplotlib.pyplot as plt
 from . import heatmap, pipeline
 
@@ -636,12 +636,7 @@ def main():
             tsv_axes.append(ax)
 
         # ── Build global Sprinzl axis (union across all sources) ───────────
-        all_labels = set()
-        for ax in per_cond_axes.values():
-            all_labels.update(ax)
-        for ax in tsv_axes:
-            all_labels.update(ax)
-        sprinzl_axis = sorted(all_labels, key=_sprinzl_sort_key)
+        sprinzl_axis = merge_axes(list(per_cond_axes.values()) + tsv_axes)
 
         # ── no_base_sets for BAM conditions (recomputed against union axis) ─
         axis_set = set(sprinzl_axis)
